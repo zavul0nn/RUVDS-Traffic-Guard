@@ -1,0 +1,56 @@
+"""Run against a fresh local preview.py process. Needs optional Playwright."""
+from pathlib import Path
+from playwright.sync_api import sync_playwright, expect
+
+p=Path(__file__).parent/'artifacts'
+p.mkdir(exist_ok=True)
+url='http://127.0.0.1:8789/preview-hidden-path-0123456789'
+errors=[]
+with sync_playwright() as pw:
+    browser=pw.chromium.launch()
+    context=browser.new_context(viewport={'width':1440,'height':1060},ignore_https_errors=True)
+    page=context.new_page()
+    page.on('pageerror',lambda error:errors.append(str(error)))
+    page.goto(url,wait_until='domcontentloaded')
+    expect(page.locator('#login-form')).to_be_visible()
+    page.screenshot(path=str(p/'login-desktop.png'),full_page=True)
+    page.locator('#password').fill('preview-password-123')
+    page.locator('#login-form button').click()
+    expect(page.locator('#node-state')).to_have_text('Работает')
+    expect(page.locator('#all-days tr')).to_have_count(5)
+    page.screenshot(path=str(p/'panel-desktop.png'),full_page=True)
+    page.locator('#pause').click()
+    expect(page.locator('#node-state')).to_have_text('Остановлена',timeout=10000)
+    page.locator('#resume').click()
+    expect(page.locator('#node-state')).to_have_text('Работает',timeout=10000)
+    page.locator('[data-tab="history"]').click()
+    expect(page.locator('#history')).to_be_visible()
+    with page.expect_download() as download:
+        page.locator('#export').click()
+    download.value.save_as(str(p/'preview-history.csv'))
+    assert 'day,used,rx,tx,complete,updated' in (p/'preview-history.csv').read_text()
+    page.locator('[data-tab="events"]').click()
+    expect(page.locator('#event-list .event')).not_to_have_count(0)
+    page.locator('[data-tab="overview"]').click()
+    page.set_viewport_size({'width':390,'height':844})
+    expect(page.locator('#traffic-chart')).to_have_attribute('viewBox','0 0 800 260',timeout=8000)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile overflow'
+    expect(page.locator('#toast')).to_be_hidden(timeout=8000)
+    page.screenshot(path=str(p/'panel-mobile.png'),full_page=True)
+    page.locator('#rearm').click()
+    expect(page.locator('#rearm-dialog')).to_be_visible()
+    page.locator('#rearm-dialog button[value="cancel"]').click()
+    expect(page.locator('#rearm-dialog')).not_to_be_visible()
+    page.locator('#rearm').click()
+    page.locator('#confirm-rearm').click()
+    expect(page.locator('#state-badge')).to_have_text('Ожидание 03:00',timeout=10000)
+    expect(page.locator('#node-state')).to_have_text('Остановлена')
+    expect(page.locator('#resume')).to_be_disabled()
+    page.locator('[data-tab="settings"]').click()
+    expect(page.locator('#setting-target')).to_have_text('remnanode')
+    page.set_viewport_size({'width':1440,'height':1060})
+    page.locator('#logout').click()
+    expect(page.locator('#login-form')).to_be_visible()
+    assert not errors, errors
+    browser.close()
+print('Browser QA passed: login, stop/start, history, CSV, events, mobile, recovery, settings, logout; no JS errors.')

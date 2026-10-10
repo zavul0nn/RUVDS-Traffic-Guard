@@ -1,0 +1,9 @@
+*
+!guard.py
+!test_guard.py
+!test_web.py
+!history.py
+!web.py
+!static/
+!static/**
+!Dockerfile

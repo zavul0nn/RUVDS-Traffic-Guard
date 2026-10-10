@@ -1,0 +1,90 @@
+name: remnanode-traffic-guard
+services:
+  guard:
+    build: .
+    image: local/remnanode-traffic-guard:2
+    user: "0:${WEB_GID:-1000}"
+    container_name: remnanode-traffic-guard
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 96m
+    stop_grace_period: 45s
+    environment:
+      TARGET_CONTAINER: ${TARGET_CONTAINER:-remnanode}
+      INTERFACE: ${INTERFACE:-eth0}
+      LIMIT_BYTES: ${LIMIT_BYTES:-145000000000}
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind: {create_host_path: false}
+      - type: bind
+        source: /sys
+        target: /host/sys
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/sys/kernel/random/boot_id
+        target: /host/boot_id
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/uptime
+        target: /host/uptime
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /var/lib/remnanode-traffic-guard
+        target: /data
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD, python, /app/guard.py, health]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '3'
+  web:
+    build: .
+    image: local/remnanode-traffic-guard:2
+    container_name: remnanode-traffic-panel
+    entrypoint: [python, /app/web.py]
+    user: "${WEB_UID:-1000}:${WEB_GID:-1000}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 48
+    mem_limit: 192m
+    environment:
+      WEB_PATH: ${WEB_PATH:?Set WEB_PATH using install.sh}
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-47479}:8080"
+    volumes:
+      - type: bind
+        source: /var/lib/remnanode-traffic-guard
+        target: /data
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /var/lib/remnanode-traffic-guard/commands
+        target: /commands
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./secrets/web-auth.json
+        target: /run/secrets/web-auth.json
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '3'

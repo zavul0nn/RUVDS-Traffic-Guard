@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-*
+artifacts/preview-history.csv
+.DS_Store
+Thumbs.db
