@@ -60,7 +60,8 @@ def sample(cfg):
 def initial(cfg, obs, passive=True):
     return dict(version=1, config=cfg, sample=obs, used=0, mode='waiting',
                 reason='first_full_utc_day', resume_pending=not passive,
-                passive_wait=passive, manual_paused=False, policy_initialized=False)
+                passive_wait=passive, manual_paused=False, policy_initialized=False,
+                accounting_complete=False, node_was_running=False)
 
 
 def validate(s, cfg):
@@ -73,7 +74,8 @@ def validate(s, cfg):
         raise ValueError('Invalid state mode/reason')
     if type(s.get('resume_pending')) is not bool:
         raise ValueError('Invalid resume flag')
-    for key in ('passive_wait', 'manual_paused', 'policy_initialized'):
+    for key in ('passive_wait', 'manual_paused', 'policy_initialized',
+                'accounting_complete', 'node_was_running'):
         if type(s.get(key, False)) is not bool:
             raise ValueError('Invalid ' + key)
     o = s['sample']
@@ -109,7 +111,8 @@ def advance(state, obs, cfg, running):
         days = (dt.date.fromisoformat(obs['day']) - dt.date.fromisoformat(old['day'])).days
         delta = sum(c - p for c, p in zip(obs['counters'], old['counters'])) if continuous else 0
         if continuous and days == 1 and elapsed <= 90:
-            s.update(mode='active', reason=None, used=delta, passive_wait=False)
+            s.update(mode='active', reason=None, used=delta, passive_wait=False,
+                     accounting_complete=True)
         else:
             s['used'] = s['used'] + delta if days == 0 else delta
         s['sample'] = obs
@@ -117,8 +120,30 @@ def advance(state, obs, cfg, running):
             s.update(mode='hold', reason='threshold', resume_pending=running)
         validate(s, cfg)
         return s
-    if obs['boot'] != old['boot'] or obs['ifindex'] != old['ifindex']:
-        raise RuntimeError('Host reboot or interface replacement')
+    if obs['boot'] != old['boot']:
+        # New kernel counters contain ALL traffic since boot. Never subtract
+        # previous-boot counters or count an already persisted boot twice.
+        days = (dt.date.fromisoformat(obs['day']) - dt.date.fromisoformat(old['day'])).days
+        boot_at = obs['wall'] - obs['uptime']
+        if days < 0 or obs['wall'] < old['wall'] or boot_at < old['wall'] - 5:
+            raise RuntimeError('Invalid reboot chronology or wall clock')
+        delta = sum(obs['counters'])
+        if days == 0:
+            s['used'] += delta
+        else:
+            # A boot before midnight conservatively charges its entire traffic
+            # to today, avoiding an unobservable division at the boundary.
+            s.update(used=delta, mode='active', reason=None)
+        s.update(sample=obs, accounting_complete=False)
+        if not s.get('manual_paused', False):
+            s['resume_pending'] = (s['resume_pending'] or
+                                   s.get('node_was_running', False) or running)
+        if s['mode'] == 'active' and s['used'] >= cfg['limit']:
+            s.update(mode='hold', reason='threshold')
+        validate(s, cfg)
+        return s
+    if obs['ifindex'] != old['ifindex']:
+        raise RuntimeError('Interface replacement')
     if any(c < p for c, p in zip(obs['counters'], old['counters'])):
         raise RuntimeError('Network counters reset')
     elapsed = obs['uptime'] - old['uptime']
@@ -132,6 +157,7 @@ def advance(state, obs, cfg, running):
             raise RuntimeError('Missing trustworthy sample at UTC rollover')
         s['used'] = delta
         s['mode'], s['reason'] = 'active', None
+        s['accounting_complete'] = True
     else:
         # Account in EVERY mode, including stopped-container background traffic.
         s['used'] += delta
@@ -284,6 +310,7 @@ class Controller:
             else:
                 raise RuntimeError('Target restart policy must remain no')
         new = advance(s, self.reader(self.cfg), self.cfg, info['State']['Running'])
+        new['node_was_running'] = info['State']['Running'] or new['resume_pending']
         if passive and new['mode'] != 'waiting':
             self.passive_marker.unlink(missing_ok=True)
             if not missing and info['HostConfig']['RestartPolicy']['Name'] != 'no':
@@ -296,11 +323,16 @@ class Controller:
             if info['State']['Running']:
                 self.docker.stop()
                 node_running = False
+                new['node_was_running'] = False
+                atomic_json(self.state, new)
         elif new['mode'] == 'active' and new['resume_pending'] and not missing:
             self.docker.start()
             node_running = True
             new['resume_pending'] = False
+            new['node_was_running'] = True
             atomic_json(self.state, new)
+        if s['sample']['boot'] != new['sample']['boot']:
+            log('host_reboot', used=new['used'], day=new['sample']['day'])
         if (s['mode'], s['reason'], s['sample']['day']) != (new['mode'], new['reason'], new['sample']['day']):
             log('transition', mode=new['mode'], reason=new['reason'], used=new['used'])
         atomic_json(self.health, dict(ok=True, at=time.time(), mode=new['mode']))
@@ -383,17 +415,30 @@ class Controller:
         if self.is_passive():
             self.health.unlink(missing_ok=True)
             return
+        s = None
         try:
             if not self.failed and not self.latch.exists():
                 s = self.load()
                 if s['mode'] == 'active' and self.docker.inspect()['State']['Running']:
                     s['resume_pending'] = True
+                    s['node_was_running'] = True
                     atomic_json(self.state, s)
         finally:
             try:
                 self.docker.stop()
             finally:
                 self.health.unlink(missing_ok=True)
+
+        if s is not None:
+            try:
+                # Stop has finished: include traffic since the last poll in a
+                # final durable checkpoint before graceful host shutdown.
+                new = advance(s, self.reader(self.cfg), self.cfg, False)
+                atomic_json(self.state, new)
+                self.record_history(s, new)
+            except Exception as error:
+                self.emergency(error)
+                raise
 
     def process_commands(self):
         directory = self.directory / 'commands'

@@ -19,6 +19,7 @@ def observation(wall=1791583200, uptime=1000, rx=100, tx=200, boot='boot-1', ifi
 def state(mode='active', used=100):
     s = guard.initial(CFG, observation())
     s.update(mode=mode, used=used, resume_pending=False,
+             accounting_complete=mode != 'waiting', passive_wait=mode == 'waiting',
              policy_initialized=True,
              reason={'active': None, 'hold': 'threshold', 'waiting': 'first_full_utc_day'}[mode])
     return s
@@ -232,6 +233,46 @@ class ControllerTests(unittest.TestCase):
         self.c.shutdown()
         self.assertFalse(self.docker.running)
         self.assertTrue(self.c.load()['resume_pending'])
+        self.assertEqual(self.c.load()['used'], 110)
+
+    def test_new_process_restores_running_node_and_saved_usage_after_reboot(self):
+        self.c.tick()
+        persisted = self.c.load()
+        self.docker.running = False
+        obs = observation(wall=persisted['sample']['wall'] + 60, uptime=10,
+                          rx=20, tx=30, boot='boot-2', ifindex=7)
+        restarted = guard.Controller(CFG, self.directory, self.docker, lambda _: obs)
+        self.addCleanup(lambda: restarted.history.db.close() if restarted.history else None)
+        restarted.tick()
+        self.assertTrue(self.docker.running)
+        self.assertEqual(restarted.load()['used'], persisted['used'] + 50)
+        self.assertFalse(restarted.latch.exists())
+        restarted.tick()
+        self.assertEqual(restarted.load()['used'], persisted['used'] + 50)
+        self.assertEqual(self.docker.starts, 1)
+        row = restarted.history.db.execute('SELECT used,complete FROM days WHERE day=?',
+                                           (obs['day'],)).fetchone()
+        self.assertEqual(row, (persisted['used'] + 50, 0))
+        event = restarted.history.db.execute('SELECT reason FROM events ORDER BY id DESC LIMIT 1').fetchone()
+        self.assertEqual(event, ('host_reboot',))
+
+    def test_reboot_traffic_reaches_limit_without_starting_node(self):
+        self.s.update(used=980, node_was_running=True)
+        guard.atomic_json(self.c.state, self.s)
+        self.docker.running = False
+        self.c.reader = lambda _: observation(wall=self.s['sample']['wall'] + 60,
+                                             uptime=10, rx=20, tx=10, boot='boot-2')
+        self.c.tick()
+        self.assertEqual(self.c.load()['used'], 1010)
+        self.assertEqual(self.c.load()['mode'], 'hold')
+        self.assertEqual(self.docker.starts, 0)
+
+    def test_corrupt_state_after_reboot_still_blocks(self):
+        self.c.state.write_text('{broken')
+        self.c.reader = lambda _: observation(boot='boot-2', uptime=1)
+        self.cycle()
+        self.assertFalse(self.docker.running)
+        self.assertTrue(self.c.latch.exists())
 
     def test_shutdown_stops_even_if_state_is_broken(self):
         self.c.state.write_text('broken')
@@ -269,6 +310,91 @@ class ControllerTests(unittest.TestCase):
         self.cycle()
         self.assertTrue(self.c.latch.exists())
         self.assertFalse(self.docker.running)
+
+
+class RebootTests(unittest.TestCase):
+    def reboot(self, s, seconds=60, rx=20, tx=30, uptime=10, boot='boot-2'):
+        return observation(wall=s['sample']['wall'] + seconds, uptime=uptime,
+                           rx=rx, tx=tx, boot=boot, ifindex=9)
+
+    def test_same_day_preserves_usage_and_adds_new_boot_counters(self):
+        s = state(used=400)
+        s['node_was_running'] = True
+        new = guard.advance(s, self.reboot(s), CFG, False)
+        self.assertEqual(new['used'], 450)
+        self.assertEqual(new['mode'], 'active')
+        self.assertTrue(new['resume_pending'])
+        self.assertFalse(new['accounting_complete'])
+        self.assertEqual(s['used'], 400)
+        again = guard.advance(new, next_sample(new, delta=7), CFG, False)
+        self.assertEqual(again['used'], 457)
+        self.assertFalse(again['accounting_complete'])
+
+    def test_multiple_reboots_never_clear_daily_usage(self):
+        s = state(used=400)
+        s = guard.advance(s, self.reboot(s), CFG, False)
+        s = guard.advance(s, self.reboot(s, boot='boot-3'), CFG, False)
+        self.assertEqual(s['used'], 500)
+
+    def test_hold_survives_same_day_reboot(self):
+        s = state('hold', 1100)
+        s['resume_pending'] = True
+        new = guard.advance(s, self.reboot(s), CFG, False)
+        self.assertEqual((new['mode'], new['used']), ('hold', 1150))
+        self.assertTrue(new['resume_pending'])
+
+    def test_manual_pause_survives_reboot_and_new_day(self):
+        for s in (state(), boundary_state()):
+            s.update(manual_paused=True, node_was_running=False)
+            new = guard.advance(s, self.reboot(s), CFG, False)
+            self.assertTrue(new['manual_paused'])
+            self.assertFalse(new['resume_pending'])
+
+    def test_stopped_node_is_not_claimed_on_reboot(self):
+        new = guard.advance(state(), self.reboot(state()), CFG, False)
+        self.assertFalse(new['resume_pending'])
+
+    def test_new_day_resets_previous_quota_and_keeps_new_boot_bytes(self):
+        s = boundary_state('hold', 1100)
+        s['resume_pending'] = True
+        new = guard.advance(s, self.reboot(s), CFG, False)
+        self.assertEqual((new['mode'], new['used']), ('active', 50))
+        self.assertTrue(new['resume_pending'])
+
+    def test_boot_before_midnight_charges_all_bytes_to_new_day(self):
+        s = boundary_state()
+        new = guard.advance(s, self.reboot(s, uptime=59), CFG, False)
+        self.assertEqual(new['used'], 50)
+        self.assertFalse(new['accounting_complete'])
+
+    def test_multiday_downtime_recovers_without_old_daily_quota(self):
+        s = state(used=900)
+        new = guard.advance(s, self.reboot(s, seconds=3 * 86400), CFG, False)
+        self.assertEqual(new['used'], 50)
+
+    def test_next_observed_midnight_restores_complete_accounting(self):
+        s = boundary_state()
+        s = guard.advance(s, self.reboot(s), CFG, False)
+        s['sample'] = observation(wall=1791676798, uptime=86348,
+                                  rx=20, tx=30, boot='boot-2', ifindex=9)
+        new = guard.advance(s, next_sample(s), CFG, False)
+        self.assertTrue(new['accounting_complete'])
+        self.assertEqual(new['used'], 10)
+
+    def test_invalid_boot_time_and_backwards_clock_are_rejected(self):
+        s = state()
+        for obs in (self.reboot(s, uptime=1000), self.reboot(s, seconds=-60)):
+            with self.subTest(obs=obs), self.assertRaises(RuntimeError):
+                guard.advance(s, obs, CFG, False)
+
+    def test_legacy_state_keeps_counter_without_new_optional_fields(self):
+        s = state(used=400)
+        s.pop('accounting_complete')
+        s.pop('node_was_running')
+        s['resume_pending'] = True
+        new = guard.advance(s, self.reboot(s), CFG, False)
+        self.assertEqual(new['used'], 450)
+        self.assertTrue(new['resume_pending'])
 
 
 class AdapterTests(unittest.TestCase):

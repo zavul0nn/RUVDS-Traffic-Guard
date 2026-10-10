@@ -3,7 +3,7 @@ const base = document.documentElement.dataset.base;
 const $ = selector => document.querySelector(selector);
 let csrf = '', busy = false, statusData = null, historyData = null;
 const modes = {active:'Учёт активен', waiting:'Ожидание 03:00', hold:'Лимит достигнут'};
-const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток'};
+const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера'};
 const gb = bytes => (Number(bytes || 0) / 1e9).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' GB';
 const mbps = bytes => (Number(bytes || 0) * 8 / 1e6).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' Мбит/с';
 const dateTime = value => new Intl.DateTimeFormat('ru-RU', {timeZone:'Europe/Moscow', day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'}).format(new Date(value * 1000));
@@ -38,6 +38,7 @@ function renderStatus(data) {
   else if(!health.ok){notice.hidden=false;notice.textContent='Ошибка наблюдения: '+(health.error || 'Проверьте журнал guard')+'. До начала первого полного периода guard не меняет состояние ноды.';}
   else if(state?.mode==='waiting'){notice.hidden=false;notice.textContent=state.passive_wait?'Guard установлен. Расход до установки неизвестен. До 03:00 МСК нода продолжает работать без ограничения со стороны guard; затем начнётся полноценный суточный учёт.':'Учёт поставлен заново. Нода остановлена до ближайших 03:00 МСК, чтобы начать полные сутки.';}
   else if(snap?.node_missing){notice.hidden=false;notice.textContent='Контейнер ещё не создан. Guard ждёт появления ноды '+(state?.config.target || '')+'.';}
+  else if(state?.accounting_complete===false){notice.hidden=false;notice.textContent='Учёт продолжен после перезагрузки. Сохранённый расход и трафик после загрузки учтены. Хвост перед выключением мог не попасть в последнюю запись; эти сутки отмечены как неполные.';}
   $('#page-error').textContent='';
   if(!state){$('#pause').disabled=$('#resume').disabled=true;$('#rearm').disabled=busy||!fresh;return;}
   const cfg=state.config, trusted=state.mode!=='waiting' && !fault;
@@ -51,7 +52,7 @@ function renderStatus(data) {
   $('#rate-rx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_rx):'—';$('#rate-tx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_tx):'—';
   $('#node-state').textContent=snap.node_missing?'Не создан':snap.node_running===null?'Не удалось проверить':snap.node_running?'Работает':'Остановлена';
   $('#node-explanation').textContent=fault?'Запуск заблокирован до восстановления учёта.':state.manual_paused?'Нода остановлена вручную. Автоматический запуск при смене суток отключён.':state.mode==='waiting'&&state.passive_wait?'Начнём ограничивать трафик с ближайших 03:00 МСК.':state.mode==='hold'?'Суточный порог достигнут. Дождитесь новых суток.':snap.node_running?'Guard следит за расходом трафика.':'Можно запустить при достоверном остатке лимита.';
-  $('#interface').textContent=cfg.interface;$('#coverage').textContent=trusted?'Полный':'Неполный';$('#controller-state').textContent=fault?'Блокировка':fresh&&health.ok?'Работает':'Требует проверки';
+  $('#interface').textContent=cfg.interface;$('#coverage').textContent=trusted&&state.accounting_complete!==false?'Полный':'Неполный';$('#controller-state').textContent=fault?'Блокировка':fresh&&health.ok?'Работает':'Требует проверки';
   $('#pause').disabled=busy||!fresh||!snap.node_running;$('#resume').disabled=busy||!fresh||!!fault||state.mode!=='active'||state.used>=cfg.limit||snap.node_missing||(snap.node_running&&!state.manual_paused);$('#rearm').disabled=busy||!fresh;
   $('#setting-target').textContent=cfg.target;$('#setting-interface').textContent=cfg.interface;$('#setting-limit').textContent=gb(cfg.limit);
 }

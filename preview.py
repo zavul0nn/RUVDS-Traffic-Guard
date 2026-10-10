@@ -29,7 +29,7 @@ def main():
                     boot='synthetic-preview', ifindex=2)
     s = guard.initial(cfg, reader(cfg))
     s.update(mode='active', reason=None, used=37_160_000_000, passive_wait=False,
-             resume_pending=False, policy_initialized=True)
+             resume_pending=False, policy_initialized=True, accounting_complete=True)
     guard.atomic_json(directory / 'state.json', s)
     history = History(directory / 'history.sqlite3')
     for back, used in ((0,37.16),(1,118.44),(2,94.83),(3,132.11),(4,107.55)):

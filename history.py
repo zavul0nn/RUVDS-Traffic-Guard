@@ -25,13 +25,20 @@ class History:
         elapsed = n['uptime'] - o['uptime']
         continuous = (n['boot'] == o['boot'] and n['ifindex'] == o['ifindex']
                       and all(c >= p for c, p in zip(n['counters'], o['counters'])))
-        drx, dtx = [c - p for c, p in zip(n['counters'], o['counters'])] if continuous else (0, 0)
+        rebooted = n['boot'] != o['boot'] and (new['mode'] != 'waiting' or
+                                              not new.get('passive_wait', False))
+        if rebooted:
+            drx, dtx = n['counters']
+        elif continuous:
+            drx, dtx = [c - p for c, p in zip(n['counters'], o['counters'])]
+        else:
+            drx = dtx = 0
         if new['mode'] != 'waiting' and old['sample']['day'] == n['day']:
             # Reconcile samples after a crash between JSON and telemetry commit.
             row = self.db.execute('SELECT rx,tx FROM days WHERE day=?', (n['day'],)).fetchone()
             if row and sum(row) + drx + dtx > new['used']:
                 drx = dtx = 0
-        complete = int(new['mode'] != 'waiting')
+        complete = int(new['mode'] != 'waiting' and new.get('accounting_complete', True))
         bucket = int(n['wall']) // 30
         with self.db:
             self.db.execute('''INSERT INTO days VALUES (?,?,?,?,?,?)
@@ -41,13 +48,13 @@ class History:
                 (n['day'], new['used'], drx, dtx, complete, n['wall']))
             if bucket != self.last_bucket:
                 self.db.execute('INSERT OR REPLACE INTO samples VALUES (?,?,?)',
-                                (int(n['wall']), drx / elapsed if elapsed > 0 else 0,
-                                 dtx / elapsed if elapsed > 0 else 0))
+                                (int(n['wall']), drx / elapsed if continuous and elapsed > 0 else 0,
+                                 dtx / elapsed if continuous and elapsed > 0 else 0))
                 self.db.execute('DELETE FROM samples WHERE at < ?', (n['wall'] - 30 * 86400,))
                 self.last_bucket = bucket
-            if (old['mode'], old['reason'], o['day']) != (new['mode'], new['reason'], n['day']):
+            if rebooted or (old['mode'], old['reason'], o['day']) != (new['mode'], new['reason'], n['day']):
                 self.db.execute('INSERT INTO events(at,mode,reason,used) VALUES (?,?,?,?)',
-                                (n['wall'], new['mode'], new['reason'], new['used']))
+                                (n['wall'], new['mode'], 'host_reboot' if rebooted else new['reason'], new['used']))
                 self.db.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 10000)')
 
     def event(self, state, reason):
