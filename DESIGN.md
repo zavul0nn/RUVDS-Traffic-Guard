@@ -30,3 +30,18 @@ navigation on mobile. Google Fonts is optional; Referrer-Policy: no-referrer pre
 Keyboard focus is explicit; charts include textual values; state never relies on
 color alone. Reduced motion disables transitions. Login is a focused form, with a
 plain warning about HTTP. Empty history explains when real data will appear.
+
+The live settings form uses the existing navy/blue palette and typography. A large
+GB field makes the main value easy to scan. Two native radio cards explain the
+stop and monitor policies without an ambiguous toggle. A consequence message
+explains immediate stops and quota-related restarts before saving. Unsaved edits
+survive background polling; saving shows progress and waits for controller
+confirmation rather than optimistic success. Validation is linked to the field,
+focus remains visible, and the primary action has a 44px minimum touch target.
+
+Applied [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill)
+alongside [frontend-design](https://github.com/anthropics/skills/tree/main/skills/frontend-design).
+The explicit UX search `inline validation saving feedback` returned form inline
+validation, accessible error summaries, and error placement. The existing page
+structure was retained; recommendations were scoped to the settings form and
+its desktop/mobile interaction states.

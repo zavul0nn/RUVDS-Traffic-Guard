@@ -2,10 +2,33 @@
 const base = document.documentElement.dataset.base;
 const $ = selector => document.querySelector(selector);
 let csrf = '', busy = false, statusData = null, historyData = null;
+let settingsDirty = false, settingsLoaded = false;
 const modes = {active:'Учёт активен', waiting:'Ожидание 03:00', hold:'Лимит достигнут'};
-const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера'};
+const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера', user_settings:'Настройки трафика изменены'};
 const gb = bytes => (Number(bytes || 0) / 1e9).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' GB';
 const mbps = bytes => (Number(bytes || 0) * 8 / 1e6).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' Мбит/с';
+const policyOf = state => state.settings || {limit_bytes:state.config.limit, stop_on_limit:true};
+function formatLimit(bytes) {const b=BigInt(bytes), fraction=b%1000000000n;return String(b/1000000000n)+(fraction?'.'+String(fraction).padStart(9,'0').replace(/0+$/,''):'');}
+function readSettings() {
+  const value=$('#limit-gb').value.trim().replace(',','.');
+  if(!/^\d+(\.\d{1,9})?$/.test(value))throw new Error('Введите положительное число GB, например 145 или 145,5. Не более 9 знаков после запятой.');
+  const [whole,fraction='']=value.split('.'), bytes=BigInt(whole)*1000000000n+BigInt(fraction.padEnd(9,'0'));
+  if(bytes<1n||bytes>9000000000000000n)throw new Error('Порог должен быть больше нуля и не превышать 9 000 000 GB.');
+  return {limit_bytes:Number(bytes),stop_on_limit:$('#policy-stop').checked};
+}
+function settingsImpact() {
+  try {const next=readSettings(), state=statusData?.snapshot?.state, reached=state&&state.used>=next.limit_bytes;
+    $('#policy-impact').textContent=!next.stop_on_limit?'Нода продолжит работать даже при превышении порога. Если её остановил лимит, она вернётся после сохранения; ручная пауза сохранится.':reached?'Уже учтённый расход выше этого порога. После сохранения нода будет остановлена сразу.':'Нода будет остановлена при достижении порога. Если поднять порог, остановленная по лимиту нода вернётся при доступном остатке.';
+  } catch {$('#policy-impact').textContent='Укажите порог, чтобы увидеть действие после сохранения.';}
+}
+function renderSettings(state, available) {
+  $('#save-settings').disabled=busy||!available||!settingsDirty;
+  for(const input of document.querySelectorAll('#quota-settings input'))input.disabled=busy||!available;
+  $('#save-settings').textContent=busy?'Применяем…':'Сохранить настройки';
+  $('#settings-status').textContent=!available?'Управление недоступно':busy?'Применяем изменения':settingsDirty?'Не сохранено':'Настройки применены';
+  if(state&&!settingsDirty&&!busy){const p=policyOf(state);$('#limit-gb').value=formatLimit(p.limit_bytes);$('#policy-stop').checked=p.stop_on_limit;$('#policy-monitor').checked=!p.stop_on_limit;settingsLoaded=true;}
+  settingsImpact();
+}
 const dateTime = value => new Intl.DateTimeFormat('ru-RU', {timeZone:'Europe/Moscow', day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'}).format(new Date(value * 1000));
 const svgElement = (tag, attrs, text) => { const e=document.createElementNS('http://www.w3.org/2000/svg',tag); Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v)); if(text!==undefined)e.textContent=text; return e; };
 function toast(message) { $('#toast').textContent=message; $('#toast').hidden=false; setTimeout(()=>$('#toast').hidden=true,6000); }
@@ -27,6 +50,7 @@ function renderStatus(data) {
   const snap=data.snapshot, health=data.health, state=snap?.state, now=Date.now()/1000;
   const fresh=health && now-health.at>=0 && now-health.at<30;
   const fault=data.fault || snap?.fault;
+  renderSettings(state,!!state&&fresh&&health.ok&&!fault);
   $('#connection').textContent=fresh?'Контроллер на связи':'Нет свежих данных';
   $('#updated').textContent=snap?'Обновлено '+dateTime(snap.at):'Измерения ещё не поступили';
   const badge=$('#state-badge'); badge.className='badge';
@@ -41,19 +65,23 @@ function renderStatus(data) {
   else if(state?.accounting_complete===false){notice.hidden=false;notice.textContent='Учёт продолжен после перезагрузки. Сохранённый расход и трафик после загрузки учтены. Хвост перед выключением мог не попасть в последнюю запись; эти сутки отмечены как неполные.';}
   $('#page-error').textContent='';
   if(!state){$('#pause').disabled=$('#resume').disabled=true;$('#rearm').disabled=busy||!fresh;return;}
-  const cfg=state.config, trusted=state.mode!=='waiting' && !fault;
+  const policy=policyOf(state), cfg={...state.config,limit:policy.limit_bytes}, trusted=state.mode!=='waiting' && !fault;
+  if(trusted&&!policy.stop_on_limit&&state.used>=cfg.limit&&fresh&&health.ok){badge.textContent='Порог превышен';badge.classList.add('waiting');}
+  if(notice.hidden&&trusted&&!policy.stop_on_limit){notice.hidden=false;notice.textContent='Режим наблюдения: расход учитывается, но превышение порога не останавливает ноду.';}
   $('#node-name').textContent=cfg.target; document.title=cfg.target+' · Traffic Guard';
   $('#used-label').textContent=state.mode==='waiting'?'Наблюдено после установки':'Использовано сегодня';
   $('#used').textContent=gb(state.used);$('#remaining').textContent=trusted?gb(Math.max(0,cfg.limit-state.used)):'Неизвестно';
   $('#usage-percent').textContent=trusted?(state.used/cfg.limit*100).toLocaleString('ru-RU',{maximumFractionDigits:1})+'% порога использовано':'Расход за полные сутки неизвестен';
-  $('#limit-caption').textContent='Защитный порог: '+gb(cfg.limit);
+  $('#limit-caption').textContent=(policy.stop_on_limit?'Защитный порог: ':'Порог наблюдения: ')+gb(cfg.limit);
+  $('.quota-remaining span').textContent=policy.stop_on_limit?'Осталось до остановки':'Осталось до порога';
   $('#accounting-description').textContent=cfg.interface+': входящий + исходящий, сутки UTC';
   drawRuler(cfg.limit,state.used,trusted);
   $('#rate-rx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_rx):'—';$('#rate-tx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_tx):'—';
   $('#node-state').textContent=snap.node_missing?'Не создан':snap.node_running===null?'Не удалось проверить':snap.node_running?'Работает':'Остановлена';
-  $('#node-explanation').textContent=fault?'Запуск заблокирован до восстановления учёта.':state.manual_paused?'Нода остановлена вручную. Автоматический запуск при смене суток отключён.':state.mode==='waiting'&&state.passive_wait?'Начнём ограничивать трафик с ближайших 03:00 МСК.':state.mode==='hold'?'Суточный порог достигнут. Дождитесь новых суток.':snap.node_running?'Guard следит за расходом трафика.':'Можно запустить при достоверном остатке лимита.';
+  $('#node-explanation').textContent=fault?'Запуск заблокирован до восстановления учёта.':state.manual_paused?'Нода остановлена вручную. Автоматический запуск при смене суток отключён.':state.mode==='waiting'&&state.passive_wait?'Начнём полный учёт с ближайших 03:00 МСК.':state.mode==='hold'?'Суточный порог достигнут. Дождитесь новых суток.':!policy.stop_on_limit?'Трафик учитывается. Остановка по порогу отключена.':snap.node_running?'Guard следит за расходом трафика.':'Можно запустить при достоверном остатке лимита.';
+  $('.node-footnote').textContent=policy.stop_on_limit?'Запуск разрешён только при доступном остатке лимита.':'Порог не ограничивает запуск. Ручная пауза и аварийная защита действуют.';
   $('#interface').textContent=cfg.interface;$('#coverage').textContent=trusted&&state.accounting_complete!==false?'Полный':'Неполный';$('#controller-state').textContent=fault?'Блокировка':fresh&&health.ok?'Работает':'Требует проверки';
-  $('#pause').disabled=busy||!fresh||!snap.node_running;$('#resume').disabled=busy||!fresh||!!fault||state.mode!=='active'||state.used>=cfg.limit||snap.node_missing||(snap.node_running&&!state.manual_paused);$('#rearm').disabled=busy||!fresh;
+  $('#pause').disabled=busy||!fresh||!snap.node_running;$('#resume').disabled=busy||!fresh||!!fault||state.mode!=='active'||(policy.stop_on_limit&&state.used>=cfg.limit)||snap.node_missing||(snap.node_running&&!state.manual_paused);$('#rearm').disabled=busy||!fresh;
   $('#setting-target').textContent=cfg.target;$('#setting-interface').textContent=cfg.interface;$('#setting-limit').textContent=gb(cfg.limit);
 }
 function rows(target, days) { const body=$(target);body.replaceChildren();if(!days.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.textContent='История появится после первых измерений. Расход до установки неизвестен.';tr.append(td);body.append(tr);return;}for(const day of days){const tr=document.createElement('tr');for(const text of [day.day,gb(day.used),gb(day.rx),gb(day.tx)]){const td=document.createElement('td');td.textContent=text;tr.append(td);}const td=document.createElement('td'),tag=document.createElement('span');tag.className='coverage-tag'+(day.complete?' full':'');tag.textContent=day.complete?'Полный':'Неполный';td.append(tag);tr.append(td);body.append(tr);} }
@@ -85,6 +113,23 @@ let resizeTimer;
 addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(statusData)renderStatus(statusData);if(historyData)drawChart(historyData.samples);},150);});
 async function refreshStatus() {try{renderStatus(await api('status'));}catch(e){$('#page-error').textContent=e.message;$('#connection').textContent='Связь потеряна';$('#pause').disabled=$('#resume').disabled=$('#rearm').disabled=true;}}
 async function refreshHistory() {try{renderHistory(await api('history'));}catch(e){$('#page-error').textContent=e.message;}}
-async function action(name) { if(busy)return;busy=true;if(statusData)renderStatus(statusData);try{const request=await api('action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:name,confirm:name==='rearm'?'rearm':undefined})});let result;for(let i=0;i<30;i++){await new Promise(resolve=>setTimeout(resolve,1000));result=await api('commands/'+request.id);if(!result.pending)break;}if(!result||result.pending)throw new Error('Ответ задерживается. Проверьте состояние перед повторным действием.');if(!result.ok)throw new Error(result.error || 'Действие не выполнено');toast({pause:'Нода остановлена',resume:'Нода запущена',rearm:'Учёт восстановлен. Нода ждёт 03:00 МСК.'}[name]);await refreshStatus();await refreshHistory();}catch(e){toast(e.message);}finally{busy=false;if(statusData)renderStatus(statusData);} }
+async function action(name, extra={}) {
+  if(busy)return false;
+  busy=true;if(statusData)renderStatus(statusData);
+  try {
+    const request=await api('action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:name,confirm:name==='rearm'?'rearm':undefined,...extra})});
+    let result;
+    for(let i=0;i<30;i++){await new Promise(resolve=>setTimeout(resolve,1000));result=await api('commands/'+request.id);if(!result.pending)break;}
+    if(!result||result.pending)throw new Error('Ответ задерживается. Проверьте состояние перед повторным действием.');
+    if(!result.ok)throw new Error(result.error || 'Действие не выполнено');
+    if(name==='settings'){settingsDirty=false;$('#settings-feedback').textContent='Сохранено. Настройки уже действуют.';$('#settings-error').textContent='';}
+    toast({pause:'Нода остановлена',resume:'Нода запущена',rearm:'Учёт восстановлен. Нода ждёт 03:00 МСК.',settings:'Настройки сохранены и применены'}[name]);
+    await refreshStatus();await refreshHistory();return true;
+  } catch(e){toast(e.message);if(name==='settings')$('#settings-error').textContent=e.message;return false;}
+  finally{busy=false;if(statusData)renderStatus(statusData);}
+}
+$('#quota-settings').addEventListener('input',()=>{settingsDirty=true;$('#settings-error').textContent='';$('#limit-gb').removeAttribute('aria-invalid');$('#settings-feedback').textContent='Изменения ещё не применены.';if(statusData)renderStatus(statusData);});
+$('#limit-gb').addEventListener('blur',()=>{if(settingsLoaded)try{readSettings();}catch(e){$('#settings-error').textContent=e.message;$('#limit-gb').setAttribute('aria-invalid','true');}});
+$('#quota-settings').addEventListener('submit',event=>{event.preventDefault();try{const settings=readSettings();$('#settings-error').textContent='';$('#limit-gb').removeAttribute('aria-invalid');action('settings',{settings});}catch(e){$('#settings-error').textContent=e.message;$('#limit-gb').setAttribute('aria-invalid','true');$('#limit-gb').focus();}});
 $('#pause').addEventListener('click',()=>action('pause'));$('#resume').addEventListener('click',()=>action('resume'));$('#rearm').addEventListener('click',()=>$('#rearm-dialog').showModal());$('#confirm-rearm').addEventListener('click',()=>{$('#rearm-dialog').close();action('rearm');});$('#logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:'{}'});location.replace(base);}catch(e){toast(e.message);}});
 countdown();setInterval(countdown,1000);refreshStatus();refreshHistory();setInterval(refreshStatus,5000);setInterval(refreshHistory,30000);

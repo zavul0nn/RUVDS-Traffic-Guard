@@ -18,6 +18,7 @@ import time
 from urllib.parse import urlsplit
 
 from history import read_history
+from guard import validate_settings
 
 
 def password_record(password):
@@ -38,13 +39,16 @@ def password_matches(password, record):
     return hmac.compare_digest(digest, base64.b64decode(record['digest']))
 
 
-def write_request(directory, action):
+def write_request(directory, action, settings=None):
     request_id = secrets.token_hex(16)
     path = directory / (request_id + '.request.json')
     temp = directory / (request_id + '.tmp')
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
     with os.fdopen(fd, 'w') as file:
-        json.dump(dict(action=action, at=time.time()), file)
+        request = dict(action=action, at=time.time())
+        if settings is not None:
+            request['settings'] = settings
+        json.dump(request, file)
         file.flush()
         os.fsync(file.fileno())
     os.replace(temp, path)
@@ -274,12 +278,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.sessions.pop(token, None)
             self.respond(200, {'ok': True}, headers={'Set-Cookie': f'guard_session=; Path={self.server.prefix}; HttpOnly; SameSite=Strict; Max-Age=0'})
             return
-        if route != '/api/action' or request.get('action') not in ('pause', 'resume', 'rearm'):
+        if route != '/api/action' or request.get('action') not in ('pause', 'resume', 'rearm', 'settings'):
             self.not_found()
             return
         if request['action'] == 'rearm' and request.get('confirm') != 'rearm':
             self.respond(400, {'error': 'Подтвердите новый период ожидания'})
             return
+        if request['action'] == 'settings':
+            try:
+                validate_settings(request.get('settings'))
+            except ValueError:
+                self.respond(400, {'error': 'Укажите положительный порог до 9 000 000 GB и действие при его достижении.'})
+                return
         try:
             with self.server.lock:
                 now = time.time()
@@ -292,7 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise RuntimeError('Controller is not running')
             if len(list(self.server.commands.glob('*.request.json'))) >= 20:
                 raise RuntimeError('Command queue is full')
-            request_id = write_request(self.server.commands, request['action'])
+            request_id = write_request(self.server.commands, request['action'],
+                                       request.get('settings') if request['action'] == 'settings' else None)
             self.respond(202, {'id': request_id})
         except Exception:
             self.respond(503, {'error': 'Контроллер недоступен. Проверьте Docker и журнал guard.'})

@@ -15,7 +15,25 @@
     </section>
     <section id="history" class="tab-panel" hidden><div class="panel-heading"><div><h2>История расхода</h2><p>Сохранённые сутки с момента установки. 1 GB = 1 000 000 000 байт.</p></div><a id="export" class="button secondary" href="__BASE__api/export">Скачать CSV</a></div><div class="table-scroll history-table"><table><thead><tr><th>Сутки UTC</th><th>Всего</th><th>Входящий</th><th>Исходящий</th><th>Учёт</th></tr></thead><tbody id="all-days"></tbody></table></div><p class="subtle-note">«Неполный» означает, что часть суток не наблюдалась. Расход провайдера может отличаться. Разбивка RX/TX также может быть неполной после сбоя статистики; решение о лимите использует отдельный суточный счётчик.</p></section>
     <section id="events" class="tab-panel" hidden><h2>События контроллера</h2><p class="section-description">Переходы суток, остановки и изменения режима.</p><div id="event-list" class="event-list"></div></section>
-    <section id="settings" class="tab-panel" hidden><h2>Параметры установки</h2><p class="section-description">Повторный запуск установщика позволяет изменить порт, путь и пароль панели.</p><dl class="settings-list"><div><dt>Целевой контейнер</dt><dd id="setting-target">—</dd></div><div><dt>Сетевой интерфейс</dt><dd id="setting-interface">—</dd></div><div><dt>Суточный порог</dt><dd id="setting-limit">—</dd></div><div><dt>Период учёта</dt><dd>00:00 — 00:00 UTC / 03:00 — 03:00 МСК</dd></div><div><dt>После достижения порога</dt><dd>Остановка ноды до следующих суток</dd></div></dl><div class="http-note"><strong>HTTP не шифрует соединение</strong><p>Секретный путь и пароль защищают от случайных запросов, но могут быть перехвачены в сети. Для удалённого доступа без сертификатов можно использовать SSH-туннель.</p></div></section>
+    <section id="settings" class="tab-panel" hidden>
+      <div class="panel-heading"><div><h2>Настройки трафика</h2><p>Меняйте порог и действие без перезапуска.</p></div><span id="settings-status" class="settings-status" role="status">Загрузка настроек</span></div>
+      <form id="quota-settings" class="settings-form">
+        <div class="settings-form-heading"><span class="section-context">Суточная политика</span><h2>Когда остановить ноду?</h2><p>Расход уже начавшихся суток сохранится при любых изменениях.</p></div>
+        <label for="limit-gb" class="field-label">Порог трафика в сутки</label>
+        <div class="limit-input"><input id="limit-gb" name="limit" type="text" inputmode="decimal" autocomplete="off" required aria-describedby="limit-help settings-error"><span>GB</span></div>
+        <p id="limit-help" class="field-help">Входящий + исходящий трафик. 1 GB = 1 000 000 000 байт.</p>
+        <p id="settings-error" class="form-error" role="alert"></p>
+        <fieldset class="policy-options"><legend>При достижении порога</legend>
+          <label class="policy-option"><input id="policy-stop" type="radio" name="limit-policy" value="stop" checked><span><strong>Останавливать ноду</strong><small>Остановить до новых суток. При включении с уже превышенным порогом — сразу.</small></span><span class="policy-tag">Защита</span></label>
+          <label class="policy-option"><input id="policy-monitor" type="radio" name="limit-policy" value="monitor"><span><strong>Только наблюдать</strong><small>Продолжать учёт и показывать превышение. Не останавливать ноду по расходу.</small></span><span class="policy-tag">Мониторинг</span></label>
+        </fieldset>
+        <p class="policy-impact" id="policy-impact">Настройки применяются сразу после сохранения.</p>
+        <div class="settings-actions"><span id="settings-feedback" role="status">Настройки сохраняются после перезагрузки сервера.</span><button id="save-settings" class="button primary" type="submit" disabled>Сохранить настройки</button></div>
+      </form>
+      <dl class="settings-list"><div><dt>Целевой контейнер</dt><dd id="setting-target">—</dd></div><div><dt>Сетевой интерфейс</dt><dd id="setting-interface">—</dd></div><div><dt>Действующий порог</dt><dd id="setting-limit">—</dd></div><div><dt>Период учёта</dt><dd>00:00 — 00:00 UTC / 03:00 — 03:00 МСК</dd></div></dl>
+      <p class="subtle-note">Порт, путь и пароль панели меняются через установщик. Режим наблюдения отменяет только остановку по трафику: ручная пауза и аварийная блокировка сохраняются.</p>
+      <div class="http-note"><strong>HTTP не шифрует соединение</strong><p>Секретный путь и пароль защищают от случайных запросов, но могут быть перехвачены в сети. Для удалённого доступа без сертификатов можно использовать SSH-туннель.</p></div>
+    </section>
     <footer class="main-footer"><span>Весь RX + TX выбранного интерфейса</span><span>Время в панели: МСК</span></footer>
   </main>
 </div>

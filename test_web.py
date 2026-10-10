@@ -89,8 +89,8 @@ class CommandsTests(unittest.TestCase):
         guard.atomic_json(self.c.state, state())
         self.addCleanup(lambda: self.c.history.db.close() if self.c.history else None)
 
-    def send(self, action):
-        request_id = web.write_request(self.commands, action)
+    def send(self, action, settings=None):
+        request_id = web.write_request(self.commands, action, settings)
         self.c.process_commands()
         return json.loads((self.commands / (request_id + '.result.json')).read_text())
 
@@ -131,6 +131,104 @@ class CommandsTests(unittest.TestCase):
         self.assertTrue(self.send('rearm')['ok'])
         self.assertFalse(self.docker.running)
         self.assertFalse(self.c.load()['passive_wait'])
+
+    def test_lower_limit_applies_immediately_without_resetting_usage(self):
+        self.assertTrue(self.send('settings', {'limit_bytes':90, 'stop_on_limit':True})['ok'])
+        self.assertEqual(self.c.load()['used'], 120)
+        self.assertEqual(self.c.load()['mode'], 'hold')
+        self.assertFalse(self.docker.running)
+
+    def test_raise_limit_restarts_only_the_node_stopped_by_quota(self):
+        self.send('settings', {'limit_bytes':90, 'stop_on_limit':True})
+        self.assertTrue(self.send('settings', {'limit_bytes':500, 'stop_on_limit':True})['ok'])
+        self.assertTrue(self.docker.running)
+        self.assertEqual(self.c.load()['used'], 140)
+        self.assertEqual(self.c.load()['mode'], 'active')
+
+    def test_monitoring_keeps_node_running_above_threshold(self):
+        self.assertTrue(self.send('settings', {'limit_bytes':90, 'stop_on_limit':False})['ok'])
+        self.assertTrue(self.docker.running)
+        self.c.tick()
+        self.assertEqual(self.c.load()['used'], 130)
+        self.assertEqual(self.c.load()['mode'], 'active')
+        self.assertEqual(self.docker.stops, 0)
+
+    def test_enabling_stop_above_limit_stops_now(self):
+        self.send('settings', {'limit_bytes':90, 'stop_on_limit':False})
+        self.assertTrue(self.send('settings', {'limit_bytes':90, 'stop_on_limit':True})['ok'])
+        self.assertFalse(self.docker.running)
+        self.assertEqual(self.c.load()['mode'], 'hold')
+
+    def test_monitoring_releases_quota_hold(self):
+        self.send('settings', {'limit_bytes':90, 'stop_on_limit':True})
+        self.assertTrue(self.send('settings', {'limit_bytes':90, 'stop_on_limit':False})['ok'])
+        self.assertTrue(self.docker.running)
+        self.assertEqual(self.c.load()['used'], 140)
+
+    def test_policy_changes_preserve_manual_pause(self):
+        self.send('pause')
+        self.assertTrue(self.send('settings', {'limit_bytes':90, 'stop_on_limit':False})['ok'])
+        self.assertFalse(self.docker.running)
+        self.assertTrue(self.c.load()['manual_paused'])
+        self.assertTrue(self.send('resume')['ok'])
+        self.assertTrue(self.docker.running)
+
+    def test_settings_do_not_claim_an_already_stopped_node(self):
+        self.docker.running = False
+        self.assertTrue(self.send('settings', {'limit_bytes':90, 'stop_on_limit':False})['ok'])
+        self.assertFalse(self.docker.running)
+        self.assertEqual(self.docker.starts, 0)
+
+    def test_settings_survive_new_controller_and_host_reboot(self):
+        policy = {'limit_bytes':90, 'stop_on_limit':False}
+        self.send('settings', policy)
+        saved = self.c.load()
+        from test_guard import observation
+        obs = observation(wall=saved['sample']['wall']+60, uptime=5,
+                          rx=20, tx=30, boot='boot-2')
+        self.docker.running = False
+        restarted = guard.Controller(CFG, self.directory, self.docker, lambda _: obs)
+        self.addCleanup(lambda: restarted.history.db.close() if restarted.history else None)
+        restarted.tick()
+        self.assertEqual(restarted.load()['settings'], policy)
+        self.assertEqual(restarted.load()['used'], saved['used']+50)
+        self.assertTrue(self.docker.running)
+
+    def test_rearm_preserves_saved_policy(self):
+        policy = {'limit_bytes':500, 'stop_on_limit':False}
+        self.send('settings', policy)
+        self.assertTrue(self.send('rearm')['ok'])
+        self.assertEqual(self.c.load()['settings'], policy)
+        self.assertEqual(self.c.load()['mode'], 'waiting')
+        self.assertFalse(self.docker.running)
+
+    def test_invalid_settings_rejected_without_fault_or_changes(self):
+        for policy in (None, {}, {'limit_bytes':True, 'stop_on_limit':True},
+                       {'limit_bytes':0, 'stop_on_limit':True},
+                       {'limit_bytes':1.5, 'stop_on_limit':True},
+                       {'limit_bytes':100, 'stop_on_limit':'false'},
+                       {'limit_bytes':100, 'stop_on_limit':True, 'target':'other'},
+                       {'limit_bytes':9_000_000_000_000_001, 'stop_on_limit':True}):
+            with self.subTest(policy=policy):
+                self.assertFalse(self.send('settings', policy)['ok'])
+                self.assertNotIn('settings', self.c.load())
+                self.assertFalse(self.c.latch.exists())
+                self.assertTrue(self.docker.running)
+
+    def test_settings_cannot_bypass_fault(self):
+        self.c.emergency(RuntimeError('bad state'))
+        self.assertFalse(self.send('settings', {'limit_bytes':90, 'stop_on_limit':False})['ok'])
+        self.assertTrue(self.c.latch.exists())
+        self.assertFalse(self.docker.running)
+
+    def test_settings_during_first_install_do_not_stop_node(self):
+        s = guard.initial(CFG, state()['sample'])
+        guard.atomic_json(self.c.state, s)
+        guard.atomic_json(self.c.passive_marker, {'waiting':True})
+        self.assertTrue(self.send('settings', {'limit_bytes':1, 'stop_on_limit':True})['ok'])
+        self.assertTrue(self.docker.running)
+        self.assertEqual(self.c.load()['mode'], 'waiting')
+        self.assertEqual(self.docker.stops, 0)
         self.assertFalse(self.c.latch.exists())
 
 
@@ -251,6 +349,34 @@ class HTTPTests(unittest.TestCase):
         self.login()
         status, _, _ = self.request('POST', '/' + self.prefix + '/api/action', {'action': 'rearm'})
         self.assertEqual(status, 400)
+
+    def test_authenticated_settings_command_contains_validated_policy(self):
+        self.login()
+        policy = {'limit_bytes':145_500_000_000, 'stop_on_limit':False}
+        status, _, body = self.request('POST', '/' + self.prefix + '/api/action',
+                                       {'action':'settings', 'settings':policy})
+        self.assertEqual(status, 202)
+        request = json.loads((self.commands / (json.loads(body)['id'] + '.request.json')).read_text())
+        self.assertEqual(request['settings'], policy)
+
+    def test_invalid_http_settings_never_enter_queue(self):
+        self.login()
+        for policy in ({}, {'limit_bytes':-1, 'stop_on_limit':True},
+                       {'limit_bytes':100, 'stop_on_limit':1},
+                       {'limit_bytes':'145', 'stop_on_limit':False}):
+            with self.subTest(policy=policy):
+                status, _, _ = self.request('POST', '/' + self.prefix + '/api/action',
+                                            {'action':'settings', 'settings':policy})
+                self.assertEqual(status, 400)
+        self.assertFalse(list(self.commands.iterdir()))
+
+    def test_settings_require_csrf_and_same_origin(self):
+        self.login()
+        for headers in ({'X-CSRF-Token':''}, {'Origin':'http://evil.invalid'}):
+            status, _, _ = self.request('POST', '/' + self.prefix + '/api/action',
+                                        {'action':'settings', 'settings':{'limit_bytes':100, 'stop_on_limit':False}}, headers)
+            self.assertEqual(status, 403)
+        self.assertFalse(list(self.commands.iterdir()))
 
     def test_expired_session_rejected(self):
         self.login()

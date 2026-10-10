@@ -64,11 +64,26 @@ def initial(cfg, obs, passive=True):
                 accounting_complete=False, node_was_running=False)
 
 
+def validate_settings(settings):
+    if not isinstance(settings, dict) or set(settings) != {'limit_bytes', 'stop_on_limit'}:
+        raise ValueError('Invalid quota settings')
+    if type(settings['limit_bytes']) is not int or not 1 <= settings['limit_bytes'] <= 9_000_000_000_000_000:
+        raise ValueError('Limit must be an integer from 1 to 9000000000000000 bytes')
+    if type(settings['stop_on_limit']) is not bool:
+        raise ValueError('stop_on_limit must be boolean')
+
+
+def effective_settings(state):
+    return state.get('settings', dict(limit_bytes=state['config']['limit'], stop_on_limit=True))
+
+
 def validate(s, cfg):
     if s.get('version') != 1 or s.get('config') != cfg:
         raise ValueError('State version/config mismatch')
     if type(s.get('used')) is not int or s['used'] < 0:
         raise ValueError('Invalid used bytes')
+    if 'settings' in s:
+        validate_settings(s['settings'])
     modes = {'active': None, 'waiting': 'first_full_utc_day', 'hold': 'threshold'}
     if s.get('mode') not in modes or s.get('reason') != modes[s['mode']]:
         raise ValueError('Invalid state mode/reason')
@@ -99,6 +114,10 @@ def advance(state, obs, cfg, running):
     validate(state, cfg)
     s = copy.deepcopy(state)
     old = s['sample']
+    policy = effective_settings(s)
+    limit, enforce = policy['limit_bytes'], policy['stop_on_limit']
+    if s['mode'] == 'hold' and (not enforce or s['used'] < limit):
+        s.update(mode='active', reason=None)
     if s['mode'] == 'waiting' and s.get('passive_wait', False):
         # Installation is observational only. A reboot/gap restarts observation,
         # never stops a node before its first trustworthy full UTC day.
@@ -116,7 +135,7 @@ def advance(state, obs, cfg, running):
         else:
             s['used'] = s['used'] + delta if days == 0 else delta
         s['sample'] = obs
-        if s['mode'] == 'active' and s['used'] >= cfg['limit']:
+        if enforce and s['mode'] == 'active' and s['used'] >= limit:
             s.update(mode='hold', reason='threshold', resume_pending=running)
         validate(s, cfg)
         return s
@@ -138,7 +157,7 @@ def advance(state, obs, cfg, running):
         if not s.get('manual_paused', False):
             s['resume_pending'] = (s['resume_pending'] or
                                    s.get('node_was_running', False) or running)
-        if s['mode'] == 'active' and s['used'] >= cfg['limit']:
+        if enforce and s['mode'] == 'active' and s['used'] >= limit:
             s.update(mode='hold', reason='threshold')
         validate(s, cfg)
         return s
@@ -162,7 +181,7 @@ def advance(state, obs, cfg, running):
         # Account in EVERY mode, including stopped-container background traffic.
         s['used'] += delta
     s['sample'] = obs
-    if s['mode'] == 'active' and s['used'] >= cfg['limit']:
+    if enforce and s['mode'] == 'active' and s['used'] >= limit:
         s.update(mode='hold', reason='threshold',
                  resume_pending=running or s['resume_pending'])
     validate(s, cfg)
@@ -389,6 +408,12 @@ class Controller:
     def arm(self, rearm=False):
         if not rearm and (self.state.exists() or self.latch.exists()):
             raise RuntimeError('State exists; refusing to overwrite')
+        saved_settings = None
+        if rearm and self.state.exists():
+            try:
+                saved_settings = self.load().get('settings')
+            except (ValueError, KeyError):
+                pass  # Recovery of damaged state still needs to be possible.
         if rearm:
             info = self.docker.inspect()
             if info['HostConfig']['RestartPolicy']['Name'] != 'no':
@@ -404,7 +429,10 @@ class Controller:
             atomic_json(self.passive_marker, {'waiting': True})
         else:
             self.passive_marker.unlink(missing_ok=True)
-        atomic_json(self.state, initial(self.cfg, self.reader(self.cfg), passive=not rearm))
+        new = initial(self.cfg, self.reader(self.cfg), passive=not rearm)
+        if saved_settings is not None:
+            new['settings'] = saved_settings
+        atomic_json(self.state, new)
         self.latch.unlink(missing_ok=True)
         self.health.unlink(missing_ok=True)
         self.failed = False
@@ -468,7 +496,8 @@ class Controller:
                         raise ValueError('Target container does not exist')
                     self.tick()  # Refresh the accounting before making a decision.
                     s = self.load()
-                    if s['mode'] != 'active' or s['used'] >= self.cfg['limit']:
+                    policy = effective_settings(s)
+                    if s['mode'] != 'active' or (policy['stop_on_limit'] and s['used'] >= policy['limit_bytes']):
                         raise ValueError('Start forbidden: no trusted remaining quota')
                     s.update(manual_paused=False, resume_pending=True)
                     atomic_json(self.state, s)
@@ -476,6 +505,16 @@ class Controller:
                 elif action == 'rearm':
                     self.arm(rearm=True)
                     self.tick()
+                elif action == 'settings':
+                    settings = req.get('settings')
+                    validate_settings(settings)
+                    if self.failed or self.latch.exists():
+                        raise ValueError('Resolve the accounting fault before changing settings')
+                    self.tick()  # Keep all consumed bytes when editing a limit.
+                    s = self.load()
+                    s['settings'] = settings
+                    atomic_json(self.state, s)
+                    self.tick()  # Apply the new policy immediately, without restart.
                 else:
                     raise ValueError('Unknown action')
                 result['ok'] = True
