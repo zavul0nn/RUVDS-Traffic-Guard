@@ -45,3 +45,23 @@ The explicit UX search `inline validation saving feedback` returned form inline
 validation, accessible error summaries, and error placement. The existing page
 structure was retained; recommendations were scoped to the settings form and
 its desktop/mobile interaction states.
+
+The monitoring refresh keeps a full-height navy navigation rail but adds native
+SVG navigation icons, clearer type hierarchy, spacious white instrument panels,
+and a quieter background. Traffic series use blue solid RX and teal dashed TX;
+the light filled area represents RX rather than decorative effects. Different
+line styles keep the meaning available without relying on hue alone.
+
+Reference review: inspected the skill repository's `screenshots/website.png`
+and rendered `projects/healthcare-dashboard/index.html` locally. These informed
+surface spacing and hierarchy; no example assets or application code were copied.
+The explicit chart query `dashboard time series tooltip` returned time-series
+line/area chart guidance with distinct line styles and keyboard hover values.
+This existing interface remains plain HTML/CSS/SVG, without a chart CDN dependency.
+
+The tooltip chooses the nearest actual measurement using timestamp search, shows
+Moscow time and RX/TX rates, and moves within the chart bounds. Missing spans over
+120 seconds stay visibly broken and report no measurement rather than fabricated
+interpolated data. Touch keeps the selection after release; keyboard selection
+supports arrows, Home/End and Escape. Range controls and measured peak values
+provide useful overview without forcing the user to inspect every point.

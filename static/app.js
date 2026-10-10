@@ -3,6 +3,7 @@ const base = document.documentElement.dataset.base;
 const $ = selector => document.querySelector(selector);
 let csrf = '', busy = false, statusData = null, historyData = null;
 let settingsDirty = false, settingsLoaded = false;
+let chartHours=24, chartState=null, chartIndex=-1;
 const modes = {active:'Учёт активен', waiting:'Ожидание 03:00', hold:'Лимит достигнут'};
 const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера', user_settings:'Настройки трафика изменены'};
 const gb = bytes => (Number(bytes || 0) / 1e9).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' GB';
@@ -78,6 +79,7 @@ function renderStatus(data) {
   drawRuler(cfg.limit,state.used,trusted);
   $('#rate-rx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_rx):'—';$('#rate-tx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_tx):'—';
   $('#node-state').textContent=snap.node_missing?'Не создан':snap.node_running===null?'Не удалось проверить':snap.node_running?'Работает':'Остановлена';
+  $('#node-state').classList.toggle('running',snap.node_running===true);
   $('#node-explanation').textContent=fault?'Запуск заблокирован до восстановления учёта.':state.manual_paused?'Нода остановлена вручную. Автоматический запуск при смене суток отключён.':state.mode==='waiting'&&state.passive_wait?'Начнём полный учёт с ближайших 03:00 МСК.':state.mode==='hold'?'Суточный порог достигнут. Дождитесь новых суток.':!policy.stop_on_limit?'Трафик учитывается. Остановка по порогу отключена.':snap.node_running?'Guard следит за расходом трафика.':'Можно запустить при достоверном остатке лимита.';
   $('.node-footnote').textContent=policy.stop_on_limit?'Запуск разрешён только при доступном остатке лимита.':'Порог не ограничивает запуск. Ручная пауза и аварийная защита действуют.';
   $('#interface').textContent=cfg.interface;$('#coverage').textContent=trusted&&state.accounting_complete!==false?'Полный':'Неполный';$('#controller-state').textContent=fault?'Блокировка':fresh&&health.ok?'Работает':'Требует проверки';
@@ -86,15 +88,66 @@ function renderStatus(data) {
 }
 function rows(target, days) { const body=$(target);body.replaceChildren();if(!days.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.textContent='История появится после первых измерений. Расход до установки неизвестен.';tr.append(td);body.append(tr);return;}for(const day of days){const tr=document.createElement('tr');for(const text of [day.day,gb(day.used),gb(day.rx),gb(day.tx)]){const td=document.createElement('td');td.textContent=text;tr.append(td);}const td=document.createElement('td'),tag=document.createElement('span');tag.className='coverage-tag'+(day.complete?' full':'');tag.textContent=day.complete?'Полный':'Неполный';td.append(tag);tr.append(td);body.append(tr);} }
 function drawChart(samples) {
-  const chart=$('#traffic-chart');chart.replaceChildren();const mobile=matchMedia('(max-width:650px)').matches;
-  chart.setAttribute('viewBox','0 0 800 '+(mobile?260:220));
-  const now=Date.now()/1000,start=now-86400,left=mobile?78:48,right=786,top=15,bottom=mobile?210:182;
-  const max=Math.max(1,...samples.flatMap(s=>[s.rx*8/1e6,s.tx*8/1e6]))*1.12;
+  const chart=$('#traffic-chart');chart.replaceChildren();hideChartPoint();const mobile=matchMedia('(max-width:650px)').matches;
+  const height=mobile?260:220;
+  chart.setAttribute('viewBox','0 0 800 '+height);
+  const now=Date.now()/1000,start=now-chartHours*3600,left=mobile?78:48,right=786,top=15,bottom=mobile?210:182;
+  const points=samples.filter(s=>Number.isFinite(s.at)&&Number.isFinite(s.rx)&&Number.isFinite(s.tx)&&s.rx>=0&&s.tx>=0&&s.at>=start&&s.at<=now).sort((a,b)=>a.at-b.at);
+  let peakRx=0,peakTx=0;for(const s of points){peakRx=Math.max(peakRx,s.rx);peakTx=Math.max(peakTx,s.tx);}
+  const max=Math.max(1,peakRx*8/1e6,peakTx*8/1e6)*1.12;
+  const xOf=s=>left+(s.at-start)/(now-start)*(right-left),yOf=value=>bottom-(value*8/1e6/max)*(bottom-top);
   for(let i=0;i<=4;i++){const y=bottom-(bottom-top)*i/4;chart.append(svgElement('line',{x1:left,y1:y,x2:right,y2:y,class:'chart-grid'}));chart.append(svgElement('text',{x:mobile?70:40,y:y+4,'text-anchor':'end',class:'chart-label'},(max*i/4).toLocaleString('ru-RU',{maximumFractionDigits:1})));}
-  for(let i=0;i<=4;i++){const x=left+(right-left)*i/4;const label=new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}).format(new Date((start+86400*i/4)*1000));chart.append(svgElement('text',{x,y:mobile?250:210,'text-anchor':i===0?'start':i===4?'end':'middle',class:'chart-label'},label));}
-  for(const key of ['rx','tx']){let path='',last=0;for(const s of samples){const x=left+(s.at-start)/86400*(right-left),y=bottom-(s[key]*8/1e6/max)*(bottom-top);path+=(last&&s.at-last<=120?'L':'M')+x.toFixed(2)+' '+y.toFixed(2)+' ';last=s.at;}chart.append(svgElement('path',{d:path,class:'chart-line'+(key==='tx'?' tx':'')}));}
-  $('#chart-empty').hidden=samples.length>1;
+  for(let i=0;i<=4;i++){const x=left+(right-left)*i/4;const label=new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}).format(new Date((start+(now-start)*i/4)*1000));chart.append(svgElement('text',{x,y:mobile?250:210,'text-anchor':i===0?'start':i===4?'end':'middle',class:'chart-label'},label));}
+  for(const key of ['rx','tx']){
+    let path='',area='',segment=[],last=0;
+    const closeArea=()=>{if(segment.length>1)area+='M'+xOf(segment[0])+','+bottom+' '+segment.map(s=>'L'+xOf(s)+','+yOf(s[key])).join(' ')+' L'+xOf(segment[segment.length-1])+','+bottom+' Z ';segment=[];};
+    for(const s of points){if(last&&s.at-last>120)closeArea();path+=(last&&s.at-last<=120?'L':'M')+xOf(s).toFixed(2)+' '+yOf(s[key]).toFixed(2)+' ';segment.push(s);last=s.at;}closeArea();
+    if(key==='rx')chart.append(svgElement('path',{d:area,class:'chart-area'}));
+    chart.append(svgElement('path',{d:path,class:'chart-line'+(key==='tx'?' tx':'')}));
+  }
+  const guide=svgElement('g',{class:'chart-selection',visibility:'hidden','aria-hidden':'true'});
+  guide.append(svgElement('line',{y1:top,y2:bottom,class:'chart-crosshair'}),svgElement('circle',{r:4.5,class:'chart-dot rx'}),svgElement('circle',{r:4.5,class:'chart-dot tx'}));chart.append(guide);
+  chartState={points,start,now,left,right,top,bottom,height,xOf,yOf,guide};
+  $('#peak-rx').textContent=points.length?mbps(peakRx):'—';$('#peak-tx').textContent=points.length?mbps(peakTx):'—';
+  $('.chart-panel .panel-heading p').textContent='Измеренная скорость за '+({1:'последний час',6:'последние 6 часов',24:'последние 24 часа'}[chartHours]);
+  $('#chart-empty').hidden=points.length>1;
 }
+function hideChartPoint(){chartIndex=-1;if(chartState)chartState.guide.setAttribute('visibility','hidden');const tip=$('#chart-tooltip');if(tip)tip.hidden=true;}
+function showChartPoint(index, targetAt=null){
+  const g=chartState;if(!g||!g.points.length)return;
+  const s=g.points[index],gap=targetAt!==null&&Math.abs(s.at-targetAt)>120;
+  const tip=$('#chart-tooltip');tip.hidden=false;
+  $('#chart-point-time').textContent=dateTime(gap?targetAt:s.at)+' МСК';
+  $('#chart-point-rx').textContent=gap?'Нет измерений':mbps(s.rx);$('#chart-point-tx').textContent=gap?'Нет измерений':mbps(s.tx);
+  const x=gap?g.left+(targetAt-g.start)/(g.now-g.start)*(g.right-g.left):g.xOf(s);
+  const [line,rx,tx]=g.guide.children;line.setAttribute('x1',x);line.setAttribute('x2',x);
+  rx.setAttribute('cx',x);rx.setAttribute('cy',g.yOf(s.rx));tx.setAttribute('cx',x);tx.setAttribute('cy',g.yOf(s.tx));
+  rx.setAttribute('visibility',gap?'hidden':'visible');tx.setAttribute('visibility',gap?'hidden':'visible');g.guide.setAttribute('visibility','visible');
+  const width=$('#traffic-chart').getBoundingClientRect().width;
+  tip.style.left=Math.max(8,Math.min(width-tip.offsetWidth-8,x/800*width-tip.offsetWidth/2))+'px';
+  chartIndex=index;
+}
+function inspectChart(event){
+  const g=chartState;if(!g||!g.points.length)return;
+  const rect=$('#traffic-chart').getBoundingClientRect(),x=(event.clientX-rect.left)/rect.width*800,y=(event.clientY-rect.top)/rect.height*g.height;
+  if(x<g.left||x>g.right||y<g.top||y>g.bottom){hideChartPoint();return;}
+  const at=g.start+(x-g.left)/(g.right-g.left)*(g.now-g.start);
+  let lo=0,hi=g.points.length-1;while(lo<hi){const mid=Math.floor((lo+hi)/2);if(g.points[mid].at<at)lo=mid+1;else hi=mid;}
+  const index=lo>0&&Math.abs(g.points[lo-1].at-at)<Math.abs(g.points[lo].at-at)?lo-1:lo;showChartPoint(index,at);
+}
+const chart=$('#traffic-chart'),wrap=document.createElement('div');wrap.className='chart-wrap';chart.before(wrap);wrap.append(chart);
+chart.setAttribute('tabindex','0');chart.setAttribute('aria-describedby','chart-hint chart-tooltip');
+const tooltip=document.createElement('div');tooltip.id='chart-tooltip';tooltip.className='chart-tooltip';tooltip.hidden=true;tooltip.setAttribute('role','status');
+tooltip.innerHTML='<strong id="chart-point-time"></strong><div><span class="rx-label">Входящий</span><b id="chart-point-rx"></b></div><div><span class="tx-label">Исходящий</span><b id="chart-point-tx"></b></div>';wrap.append(tooltip);
+const chartExtras=document.createElement('div');chartExtras.className='chart-extras';chartExtras.innerHTML='<div class="chart-ranges" role="group" aria-label="Период графика"><button type="button" data-hours="1" aria-pressed="false">1 час</button><button type="button" data-hours="6" aria-pressed="false">6 часов</button><button type="button" data-hours="24" aria-pressed="true">24 часа</button></div><p id="chart-hint">Наведите курсор или коснитесь графика. С клавиатуры — стрелки.</p>';wrap.before(chartExtras);
+const peaks=document.createElement('div');peaks.className='chart-peaks';peaks.innerHTML='<span>Пик входящего <strong id="peak-rx">—</strong></span><span>Пик исходящего <strong id="peak-tx">—</strong></span>';wrap.after(peaks);
+chart.addEventListener('pointermove',inspectChart);chart.addEventListener('pointerdown',inspectChart);chart.addEventListener('pointerleave',event=>{if(event.pointerType!=='touch')hideChartPoint();});chart.addEventListener('pointercancel',hideChartPoint);chart.addEventListener('blur',hideChartPoint);
+chart.addEventListener('focus',()=>{if(chartState?.points.length)showChartPoint(chartState.points.length-1);});
+chart.addEventListener('keydown',event=>{const g=chartState;if(!g||!g.points.length)return;if(event.key==='Escape'){hideChartPoint();return;}if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const index=event.key==='Home'?0:event.key==='End'?g.points.length-1:Math.max(0,Math.min(g.points.length-1,(chartIndex<0?g.points.length-1:chartIndex)+(event.key==='ArrowLeft'?-1:1)));showChartPoint(index);});
+document.querySelectorAll('[data-hours]').forEach(button=>button.addEventListener('click',()=>{chartHours=Number(button.dataset.hours);document.querySelectorAll('[data-hours]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));if(historyData)drawChart(historyData.samples);}));
+const navIcons={overview:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',history:'M4 20V10 M10 20V4 M16 20v-7 M22 20H2',events:'M12 8v5l3 2 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0',settings:'M4 7h16 M4 17h16 M9 4v6 M16 14v6'};
+document.querySelectorAll('.sidebar [data-tab]').forEach(button=>{const icon=svgElement('svg',{viewBox:'0 0 24 24',class:'nav-icon','aria-hidden':'true'});icon.append(svgElement('path',{d:navIcons[button.dataset.tab]}));button.prepend(icon);});
+$('.brand span:last-child').lastChild.textContent=' Guard';
 function renderHistory(data) {
   historyData=data;
   rows('#recent-days',data.days.slice(0,5));rows('#all-days',data.days);drawChart(data.samples);
