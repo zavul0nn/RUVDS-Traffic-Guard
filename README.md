@@ -14,7 +14,7 @@
 
 </div>
 
-![Обзор Traffic Guard: суточный лимит, график трафика, состояние ноды и история](artifacts/panel-desktop.png)
+![Обзор Traffic Guard: суточный лимит, график трафика, состояние ноды и история](artifacts/panel-desktop-v2.png)
 
 <p align="center"><sub>Панель на демонстрационных данных. Скриншоты сделаны в локальном preview.</sub></p>
 
@@ -44,7 +44,7 @@ Traffic Guard работает в отдельном Docker-контейнере
 
 ### Мобильная версия
 
-<img src="artifacts/panel-mobile.png" alt="Traffic Guard на телефоне: лимит, график, управление нодой и история" width="390">
+<img src="artifacts/panel-mobile-v2.png" alt="Traffic Guard на телефоне: лимит, график, управление нодой и история" width="390">
 
 Все значения на скриншотах демонстрационные.
 

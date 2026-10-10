@@ -18,7 +18,7 @@ with sync_playwright() as pw:
     page.locator('#login-form button').click()
     expect(page.locator('#node-state')).to_have_text('Работает')
     expect(page.locator('#all-days tr')).to_have_count(5)
-    page.screenshot(path=str(p/'panel-desktop.png'),full_page=True)
+    page.screenshot(path=str(p/'panel-desktop-v2.png'),full_page=True)
     page.locator('#pause').click()
     expect(page.locator('#node-state')).to_have_text('Остановлена',timeout=10000)
     page.locator('#resume').click()
@@ -36,7 +36,7 @@ with sync_playwright() as pw:
     expect(page.locator('#traffic-chart')).to_have_attribute('viewBox','0 0 800 260',timeout=8000)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile overflow'
     expect(page.locator('#toast')).to_be_hidden(timeout=8000)
-    page.screenshot(path=str(p/'panel-mobile.png'),full_page=True)
+    page.screenshot(path=str(p/'panel-mobile-v2.png'),full_page=True)
     page.locator('#rearm').click()
     expect(page.locator('#rearm-dialog')).to_be_visible()
     page.locator('#rearm-dialog button[value="cancel"]').click()
