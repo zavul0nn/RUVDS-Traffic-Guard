@@ -21,6 +21,13 @@ from history import read_history
 from guard import validate_settings
 
 
+def controller_fresh(health, now):
+    if not isinstance(health, dict):
+        return False
+    stamp = health.get('at')
+    return type(stamp) in (int, float) and 0 <= now - stamp < 30
+
+
 def password_record(password):
     if not 12 <= len(password) <= 256:
         raise ValueError('Password must contain 12 to 256 characters')
@@ -210,6 +217,8 @@ class Handler(BaseHTTPRequestHandler):
                         result['snapshot'] = dict(at=saved['sample']['wall'], state=saved, node_running=None)
                     except (ValueError, OSError, KeyError):
                         pass
+                result['server_time'] = time.time()
+                result['controller_fresh'] = controller_fresh(result['health'], result['server_time'])
                 self.respond(200, result)
             elif route in ('/api/history', '/api/export'):
                 result = read_history(self.server.data / 'history.sqlite3', time.time())
@@ -221,6 +230,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(200, output.getvalue(), 'text/csv; charset=utf-8',
                                  {'Content-Disposition': 'attachment; filename="traffic-history.csv"'})
                 else:
+                    result['server_time'] = time.time()
                     self.respond(200, result)
             elif re.fullmatch(r'/api/commands/[0-9a-f]{32}', route):
                 path = self.server.commands / (route.rsplit('/', 1)[1] + '.result.json')
@@ -298,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.server.sessions[token]['command_at'] = now
             health = json.loads((self.server.data / 'health.json').read_text())
-            if not 0 <= time.time() - health['at'] < 30:
+            if not controller_fresh(health, time.time()):
                 raise RuntimeError('Controller is not running')
             if len(list(self.server.commands.glob('*.request.json'))) >= 20:
                 raise RuntimeError('Command queue is full')

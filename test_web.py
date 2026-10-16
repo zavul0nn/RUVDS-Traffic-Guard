@@ -391,6 +391,32 @@ class HTTPTests(unittest.TestCase):
         status, _, _ = self.request('POST', '/' + self.prefix + '/api/action', {'action': 'pause'})
         self.assertEqual(status, 503)
 
+    def test_status_freshness_uses_server_clock(self):
+        self.login()
+        for age, fresh in ((2, True), (29, True), (31, False), (-60, False)):
+            with self.subTest(age=age):
+                guard.atomic_json(self.data / 'health.json', {'ok': True, 'at': time.time() - age})
+                before = time.time()
+                status, _, body = self.request('GET', '/' + self.prefix + '/api/status')
+                result = json.loads(body)
+                self.assertEqual(status, 200)
+                self.assertIs(result['controller_fresh'], fresh)
+                self.assertLessEqual(before, result['server_time'])
+                self.assertLessEqual(result['server_time'], time.time())
+
+    def test_missing_or_malformed_health_is_not_fresh(self):
+        self.login()
+        for health in (None, [], {}, {'at':'broken'}, {'at':True}):
+            with self.subTest(health=health):
+                guard.atomic_json(self.data / 'health.json', health)
+                status, _, body = self.request('GET', '/' + self.prefix + '/api/status')
+                self.assertEqual(status, 200)
+                self.assertIs(json.loads(body)['controller_fresh'], False)
+        (self.data / 'health.json').unlink()
+        status, _, body = self.request('GET', '/' + self.prefix + '/api/status')
+        self.assertEqual(status, 200)
+        self.assertIs(json.loads(body)['controller_fresh'], False)
+
     def test_logout_invalidates_session(self):
         self.login()
         status, _, _ = self.request('POST', '/' + self.prefix + '/api/logout', {})

@@ -4,6 +4,9 @@ const $ = selector => document.querySelector(selector);
 let csrf = '', busy = false, statusData = null, historyData = null;
 let settingsDirty = false, settingsLoaded = false;
 let chartHours=24, chartState=null, chartIndex=-1;
+let serverClock=null;
+function syncServerClock(data) {if(Number.isFinite(data.server_time))serverClock={at:data.server_time,tick:performance.now()};}
+function serverNow() {return serverClock?serverClock.at+(performance.now()-serverClock.tick)/1000:null;}
 const modes = {active:'Учёт активен', waiting:'Ожидание 03:00', hold:'Лимит достигнут'};
 const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера', user_settings:'Настройки трафика изменены'};
 const gb = bytes => (Number(bytes || 0) / 1e9).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' GB';
@@ -37,7 +40,7 @@ async function api(path, options={}) { const response=await fetch(base+'api/'+pa
 function selectTab(name) { document.querySelectorAll('.tab-panel').forEach(el=>el.hidden=el.id!==name); document.querySelectorAll('[data-tab]').forEach(el=>{const selected=el.dataset.tab===name;el.classList.toggle('selected',selected); if(selected)el.setAttribute('aria-current','page'); else el.removeAttribute('aria-current');}); }
 document.querySelectorAll('[data-tab]').forEach(el=>el.addEventListener('click',()=>selectTab(el.dataset.tab)));
 document.querySelectorAll('[data-open-tab]').forEach(el=>el.addEventListener('click',()=>selectTab(el.dataset.openTab)));
-function countdown() { const now=new Date(), next=new Date(now); next.setUTCHours(24,0,0,0); const seconds=Math.max(0,Math.floor((next-now)/1000)); $('#reset-countdown').textContent=[Math.floor(seconds/3600),Math.floor(seconds/60)%60,seconds%60].map(n=>String(n).padStart(2,'0')).join(':'); }
+function countdown() { const stamp=serverNow();if(stamp===null){$('#reset-countdown').textContent='—';return;} const now=new Date(stamp*1000), next=new Date(now); next.setUTCHours(24,0,0,0); const seconds=Math.max(0,Math.floor((next-now)/1000)); $('#reset-countdown').textContent=[Math.floor(seconds/3600),Math.floor(seconds/60)%60,seconds%60].map(n=>String(n).padStart(2,'0')).join(':'); }
 function drawRuler(limit, used, trusted) {
   const mobile=matchMedia('(max-width:650px)').matches;
   $('#quota-ruler').setAttribute('viewBox','0 0 1000 '+(mobile?100:62));
@@ -48,8 +51,9 @@ function drawRuler(limit, used, trusted) {
 }
 function renderStatus(data) {
   statusData=data; csrf=data.csrf;
-  const snap=data.snapshot, health=data.health, state=snap?.state, now=Date.now()/1000;
-  const fresh=health && now-health.at>=0 && now-health.at<30;
+  syncServerClock(data);countdown();
+  const snap=data.snapshot, health=data.health, state=snap?.state;
+  const fresh=data.controller_fresh===true;
   const fault=data.fault || snap?.fault;
   renderSettings(state,!!state&&fresh&&health.ok&&!fault);
   $('#connection').textContent=fresh?'Контроллер на связи':'Нет свежих данных';
@@ -88,10 +92,11 @@ function renderStatus(data) {
 }
 function rows(target, days) { const body=$(target);body.replaceChildren();if(!days.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.textContent='История появится после первых измерений. Расход до установки неизвестен.';tr.append(td);body.append(tr);return;}for(const day of days){const tr=document.createElement('tr');for(const text of [day.day,gb(day.used),gb(day.rx),gb(day.tx)]){const td=document.createElement('td');td.textContent=text;tr.append(td);}const td=document.createElement('td'),tag=document.createElement('span');tag.className='coverage-tag'+(day.complete?' full':'');tag.textContent=day.complete?'Полный':'Неполный';td.append(tag);tr.append(td);body.append(tr);} }
 function drawChart(samples) {
+  const now=serverNow();if(now===null)return;
   const chart=$('#traffic-chart');chart.replaceChildren();hideChartPoint();const mobile=matchMedia('(max-width:650px)').matches;
   const height=mobile?260:220;
   chart.setAttribute('viewBox','0 0 800 '+height);
-  const now=Date.now()/1000,start=now-chartHours*3600,left=mobile?78:48,right=786,top=15,bottom=mobile?210:182;
+  const start=now-chartHours*3600,left=mobile?78:48,right=786,top=15,bottom=mobile?210:182;
   const points=samples.filter(s=>Number.isFinite(s.at)&&Number.isFinite(s.rx)&&Number.isFinite(s.tx)&&s.rx>=0&&s.tx>=0&&s.at>=start&&s.at<=now).sort((a,b)=>a.at-b.at);
   let peakRx=0,peakTx=0;for(const s of points){peakRx=Math.max(peakRx,s.rx);peakTx=Math.max(peakTx,s.tx);}
   const max=Math.max(1,peakRx*8/1e6,peakTx*8/1e6)*1.12;
@@ -149,6 +154,7 @@ const navIcons={overview:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z'
 document.querySelectorAll('.sidebar [data-tab]').forEach(button=>{const icon=svgElement('svg',{viewBox:'0 0 24 24',class:'nav-icon','aria-hidden':'true'});icon.append(svgElement('path',{d:navIcons[button.dataset.tab]}));button.prepend(icon);});
 $('.brand span:last-child').lastChild.textContent=' Guard';
 function renderHistory(data) {
+  syncServerClock(data);
   historyData=data;
   rows('#recent-days',data.days.slice(0,5));rows('#all-days',data.days);drawChart(data.samples);
   const list=$('#event-list');list.replaceChildren();
