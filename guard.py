@@ -77,6 +77,17 @@ def effective_settings(state):
     return state.get('settings', dict(limit_bytes=state['config']['limit'], stop_on_limit=True))
 
 
+def validate_target(target, cfg):
+    allowed = ({'kind': 'docker', 'name': cfg['target']},
+               {'kind': 'systemd', 'name': 'haproxy.service'})
+    if not isinstance(target, dict) or target not in allowed:
+        raise ValueError('Choose the configured Docker container or haproxy.service')
+
+
+def effective_target(state):
+    return state.get('managed_target', {'kind': 'docker', 'name': state['config']['target']})
+
+
 def validate(s, cfg):
     if s.get('version') != 1 or s.get('config') != cfg:
         raise ValueError('State version/config mismatch')
@@ -84,6 +95,8 @@ def validate(s, cfg):
         raise ValueError('Invalid used bytes')
     if 'settings' in s:
         validate_settings(s['settings'])
+    if 'managed_target' in s:
+        validate_target(s['managed_target'], cfg)
     modes = {'active': None, 'waiting': 'first_full_utc_day', 'hold': 'threshold'}
     if s.get('mode') not in modes or s.get('reason') != modes[s['mode']]:
         raise ValueError('Invalid state mode/reason')
@@ -286,13 +299,51 @@ class Docker:
             conn.close()
 
 
+class SystemdTarget:
+    def request(self, action):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(30)
+            conn.connect('/host/target/control.sock')
+            conn.sendall(json.dumps({'action': action}).encode() + b'\n')
+            with conn.makefile('rb') as file:
+                response = json.loads(file.readline(8192))
+        if not response.get('ok'):
+            raise RuntimeError(response.get('error', 'Host target bridge failed'))
+        result = response['result']
+        if result.get('missing'):
+            raise TargetMissing('haproxy.service is not installed')
+        return result
+
+    def inspect(self):
+        return self.request('inspect')
+
+    def stop(self):
+        try:
+            self.request('stop')
+        except TargetMissing:
+            pass
+
+    def start(self):
+        self.request('start')
+
+    def set_restart_no(self):
+        self.request('set_restart_no')
+
+
+def target_adapter(target):
+    return SystemdTarget() if target['kind'] == 'systemd' else Docker(target['name'])
+
+
 class Controller:
-    def __init__(self, cfg, directory, docker, reader=sample):
+    def __init__(self, cfg, directory, docker, reader=sample, target_factory=None):
         self.cfg, self.directory, self.docker, self.reader = cfg, directory, docker, reader
+        self.target_factory = target_factory
+        self.selected_target = {'kind': 'docker', 'name': cfg['target']}
         self.state = directory / 'state.json'
         self.latch = directory / 'fault.json'
         self.health = directory / 'health.json'
         self.passive_marker = directory / 'passive-wait.json'
+        self.target_hint = directory / 'target.json'
         self.failed = False
         self.last_state = None
         self.history = None
@@ -309,6 +360,12 @@ class Controller:
     def load(self):
         s = json.loads(self.state.read_text())
         validate(s, self.cfg)
+        target = effective_target(s)
+        if target != self.selected_target:
+            if self.target_factory is None:
+                raise ValueError('Target switching is unavailable')
+            self.docker = self.target_factory(target)
+            self.selected_target = copy.deepcopy(target)
         return s
 
     def tick(self):
@@ -409,9 +466,12 @@ class Controller:
         if not rearm and (self.state.exists() or self.latch.exists()):
             raise RuntimeError('State exists; refusing to overwrite')
         saved_settings = None
+        saved_target = copy.deepcopy(self.selected_target) if rearm else None
         if rearm and self.state.exists():
             try:
-                saved_settings = self.load().get('settings')
+                saved = self.load()
+                saved_settings = saved.get('settings')
+                saved_target = saved.get('managed_target', saved_target)
             except (ValueError, KeyError):
                 pass  # Recovery of damaged state still needs to be possible.
         if rearm:
@@ -430,8 +490,13 @@ class Controller:
         else:
             self.passive_marker.unlink(missing_ok=True)
         new = initial(self.cfg, self.reader(self.cfg), passive=not rearm)
+        if saved_target is not None:
+            new['managed_target'] = saved_target
+        elif not rearm and os.getenv('TARGET_MODE') == 'haproxy':
+            new['managed_target'] = {'kind': 'systemd', 'name': 'haproxy.service'}
         if saved_settings is not None:
             new['settings'] = saved_settings
+        atomic_json(self.target_hint, effective_target(new))
         atomic_json(self.state, new)
         self.latch.unlink(missing_ok=True)
         self.health.unlink(missing_ok=True)
@@ -515,6 +580,31 @@ class Controller:
                     s['settings'] = settings
                     atomic_json(self.state, s)
                     self.tick()  # Apply the new policy immediately, without restart.
+                elif action == 'target':
+                    target = req.get('target')
+                    validate_target(target, self.cfg)
+                    if self.failed or self.latch.exists():
+                        raise ValueError('Resolve the accounting fault before changing target')
+                    if self.target_factory is None:
+                        raise ValueError('Target switching is unavailable')
+                    candidate = self.target_factory(target)
+                    try:
+                        info = candidate.inspect()
+                    except (OSError, RuntimeError, ValueError) as error:
+                        raise ValueError(str(error)) from error
+                    self.tick()  # Account under the previous target before handing over.
+                    s = self.load()
+                    if target != effective_target(s):
+                        s.update(managed_target=target, policy_initialized=False,
+                                 manual_paused=False, resume_pending=False,
+                                 node_was_running=info['State']['Running'])
+                        if s['mode'] == 'hold':
+                            s['resume_pending'] = info['State']['Running']
+                        # Independent hint lets emergency recovery stop the right
+                        # service even if the main accounting file is damaged.
+                        atomic_json(self.target_hint, target)
+                        atomic_json(self.state, s)
+                    self.tick()
                 else:
                     raise ValueError('Unknown action')
                 result['ok'] = True
@@ -553,7 +643,19 @@ def main():
         except Exception:
             return 1
     cfg = config()
-    controller = Controller(cfg, directory, Docker(cfg['target']))
+    controller = Controller(cfg, directory, Docker(cfg['target']), target_factory=target_adapter)
+    if controller.state.exists():
+        try:
+            controller.load()  # Select the persisted target before emergency/shutdown handling.
+        except Exception:
+            try:
+                target = json.loads(controller.target_hint.read_text())
+                validate_target(target, cfg)
+                controller.docker = target_adapter(target)
+                controller.selected_target = target
+            except Exception:
+                if os.getenv('TARGET_MODE') == 'haproxy':
+                    controller.docker = SystemdTarget()
     if args.command == 'status':
         for name in ('state.json', 'fault.json', 'health.json'):
             path = directory / name

@@ -391,6 +391,22 @@ class HTTPTests(unittest.TestCase):
         status, _, _ = self.request('POST', '/' + self.prefix + '/api/action', {'action': 'pause'})
         self.assertEqual(status, 503)
 
+    def test_target_change_is_authenticated_and_bounded(self):
+        self.login()
+        guard.atomic_json(self.data / 'state.json', state())
+        payload = {'action':'target', 'target':{'kind':'systemd', 'name':'haproxy.service'}}
+        status, _, _ = self.request('POST', '/' + self.prefix + '/api/action', payload,
+                                    {'X-CSRF-Token':''})
+        self.assertEqual(status, 403)
+        status, _, _ = self.request('POST', '/' + self.prefix + '/api/action',
+                                    {'action':'target', 'target':{'kind':'systemd','name':'ssh.service'}})
+        self.assertEqual(status, 400)
+        self.assertFalse(list(self.commands.iterdir()))
+        status, _, body = self.request('POST', '/' + self.prefix + '/api/action', payload)
+        self.assertEqual(status, 202)
+        req = json.loads((self.commands / (json.loads(body)['id'] + '.request.json')).read_text())
+        self.assertEqual(req['target'], payload['target'])
+
     def test_status_freshness_uses_server_clock(self):
         self.login()
         for age, fresh in ((2, True), (29, True), (31, False), (-60, False)):

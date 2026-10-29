@@ -3,12 +3,15 @@ const base = document.documentElement.dataset.base;
 const $ = selector => document.querySelector(selector);
 let csrf = '', busy = false, statusData = null, historyData = null;
 let settingsDirty = false, settingsLoaded = false;
+let targetDirty=false;
+const targetOf=state=>state.managed_target||{kind:'docker',name:state.config.target};
 let chartHours=24, chartState=null, chartIndex=-1;
 let serverClock=null;
 function syncServerClock(data) {if(Number.isFinite(data.server_time))serverClock={at:data.server_time,tick:performance.now()};}
 function serverNow() {return serverClock?serverClock.at+(performance.now()-serverClock.tick)/1000:null;}
 const modes = {active:'Учёт активен', waiting:'Ожидание 03:00', hold:'Лимит достигнут'};
-const reasons = {threshold:'Достигнут суточный порог', user_pause:'Нода остановлена вручную', user_resume:'Нода запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера', user_settings:'Настройки трафика изменены'};
+const reasons = {threshold:'Достигнут суточный порог', user_pause:'Служба остановлена вручную', user_resume:'Служба запущена вручную', user_rearm:'Учёт восстановлен с ожиданием новых суток', first_full_utc_day:'Ожидание первых полных суток', host_reboot:'Учёт продолжен после перезагрузки сервера', user_settings:'Настройки трафика изменены'};
+reasons.user_target='Цель управления изменена';
 const gb = bytes => (Number(bytes || 0) / 1e9).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' GB';
 const mbps = bytes => (Number(bytes || 0) * 8 / 1e6).toLocaleString('ru-RU', {maximumFractionDigits:2}) + ' Мбит/с';
 const policyOf = state => state.settings || {limit_bytes:state.config.limit, stop_on_limit:true};
@@ -22,10 +25,13 @@ function readSettings() {
 }
 function settingsImpact() {
   try {const next=readSettings(), state=statusData?.snapshot?.state, reached=state&&state.used>=next.limit_bytes;
-    $('#policy-impact').textContent=!next.stop_on_limit?'Нода продолжит работать даже при превышении порога. Если её остановил лимит, она вернётся после сохранения; ручная пауза сохранится.':reached?'Уже учтённый расход выше этого порога. После сохранения нода будет остановлена сразу.':'Нода будет остановлена при достижении порога. Если поднять порог, остановленная по лимиту нода вернётся при доступном остатке.';
+    $('#policy-impact').textContent=!next.stop_on_limit?'Служба продолжит работать даже при превышении порога. Если её остановил лимит, она вернётся после сохранения; ручная пауза сохранится.':reached?'Уже учтённый расход выше этого порога. После сохранения служба будет остановлена сразу.':'Служба будет остановлена при достижении порога. Если поднять порог, остановленная по лимиту служба вернётся при доступном остатке.';
   } catch {$('#policy-impact').textContent='Укажите порог, чтобы увидеть действие после сохранения.';}
 }
 function renderSettings(state, available) {
+  $('#target-select').disabled=busy||!available;
+  $('#save-target').disabled=busy||!available||!targetDirty;
+  if(state&&!targetDirty&&!busy){$('#target-select').value=targetOf(state).kind;$('#target-select option[value="docker"]').textContent=state.config.target+' · Docker';}
   $('#save-settings').disabled=busy||!available||!settingsDirty;
   for(const input of document.querySelectorAll('#quota-settings input'))input.disabled=busy||!available;
   $('#save-settings').textContent=busy?'Применяем…':'Сохранить настройки';
@@ -64,16 +70,20 @@ function renderStatus(data) {
   const notice=$('#notice');notice.hidden=true;notice.className='notice';
   if(fault){notice.hidden=false;notice.classList.add('fault');notice.textContent='Guard заблокировал работу: '+(typeof fault==='string'?fault:fault.error)+'. Устраните причину и используйте «Восстановить учёт».';}
   else if(!fresh){notice.hidden=false;notice.classList.add('fault');notice.textContent='Контроллер не присылает свежие данные. Значения на экране сохранённые; управление временно недоступно.';}
-  else if(!health.ok){notice.hidden=false;notice.textContent='Ошибка наблюдения: '+(health.error || 'Проверьте журнал guard')+'. До начала первого полного периода guard не меняет состояние ноды.';}
-  else if(state?.mode==='waiting'){notice.hidden=false;notice.textContent=state.passive_wait?'Guard установлен. Расход до установки неизвестен. До 03:00 МСК нода продолжает работать без ограничения со стороны guard; затем начнётся полноценный суточный учёт.':'Учёт поставлен заново. Нода остановлена до ближайших 03:00 МСК, чтобы начать полные сутки.';}
-  else if(snap?.node_missing){notice.hidden=false;notice.textContent='Контейнер ещё не создан. Guard ждёт появления ноды '+(state?.config.target || '')+'.';}
+  else if(!health.ok){notice.hidden=false;notice.textContent='Ошибка наблюдения: '+(health.error || 'Проверьте журнал guard')+'. До начала первого полного периода guard не меняет состояние службы.';}
+  else if(state?.mode==='waiting'){notice.hidden=false;notice.textContent=state.passive_wait?'Guard установлен. Расход до установки неизвестен. До 03:00 МСК служба продолжает работать без ограничения со стороны guard; затем начнётся полноценный суточный учёт.':'Учёт поставлен заново. Служба остановлена до ближайших 03:00 МСК, чтобы начать полные сутки.';}
+  else if(snap?.node_missing){notice.hidden=false;notice.textContent='Сервис не найден. Guard ждёт появления '+(state?targetOf(state).name:'')+'.';}
   else if(state?.accounting_complete===false){notice.hidden=false;notice.textContent='Учёт продолжен после перезагрузки. Сохранённый расход и трафик после загрузки учтены. Хвост перед выключением мог не попасть в последнюю запись; эти сутки отмечены как неполные.';}
   $('#page-error').textContent='';
   if(!state){$('#pause').disabled=$('#resume').disabled=true;$('#rearm').disabled=busy||!fresh;return;}
   const policy=policyOf(state), cfg={...state.config,limit:policy.limit_bytes}, trusted=state.mode!=='waiting' && !fault;
   if(trusted&&!policy.stop_on_limit&&state.used>=cfg.limit&&fresh&&health.ok){badge.textContent='Порог превышен';badge.classList.add('waiting');}
-  if(notice.hidden&&trusted&&!policy.stop_on_limit){notice.hidden=false;notice.textContent='Режим наблюдения: расход учитывается, но превышение порога не останавливает ноду.';}
-  $('#node-name').textContent=cfg.target; document.title=cfg.target+' · Traffic Guard';
+  if(notice.hidden&&trusted&&!policy.stop_on_limit){notice.hidden=false;notice.textContent='Режим наблюдения: расход учитывается, но превышение порога не останавливает службу.';}
+  const target=targetOf(state),targetName=target.kind==='systemd'?'HAProxy':target.name;
+  $('#node-name').textContent=targetName; document.title=targetName+' · Traffic Guard';
+  $('.page-header .section-context').textContent='Управление сервисом';
+  $('.node-heading h2').textContent='Состояние сервиса';
+  $('#pause').textContent='Остановить '+targetName;$('#resume').textContent='Запустить '+targetName;
   $('#used-label').textContent=state.mode==='waiting'?'Наблюдено после установки':'Использовано сегодня';
   $('#used').textContent=gb(state.used);$('#remaining').textContent=trusted?gb(Math.max(0,cfg.limit-state.used)):'Неизвестно';
   $('#usage-percent').textContent=trusted?(state.used/cfg.limit*100).toLocaleString('ru-RU',{maximumFractionDigits:1})+'% порога использовано':'Расход за полные сутки неизвестен';
@@ -84,11 +94,11 @@ function renderStatus(data) {
   $('#rate-rx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_rx):'—';$('#rate-tx').textContent=fresh&&health.ok&&!fault?mbps(snap.rate_tx):'—';
   $('#node-state').textContent=snap.node_missing?'Не создан':snap.node_running===null?'Не удалось проверить':snap.node_running?'Работает':'Остановлена';
   $('#node-state').classList.toggle('running',snap.node_running===true);
-  $('#node-explanation').textContent=fault?'Запуск заблокирован до восстановления учёта.':state.manual_paused?'Нода остановлена вручную. Автоматический запуск при смене суток отключён.':state.mode==='waiting'&&state.passive_wait?'Начнём полный учёт с ближайших 03:00 МСК.':state.mode==='hold'?'Суточный порог достигнут. Дождитесь новых суток.':!policy.stop_on_limit?'Трафик учитывается. Остановка по порогу отключена.':snap.node_running?'Guard следит за расходом трафика.':'Можно запустить при достоверном остатке лимита.';
+  $('#node-explanation').textContent=fault?'Запуск заблокирован до восстановления учёта.':state.manual_paused?'Служба остановлена вручную. Автоматический запуск при смене суток отключён.':state.mode==='waiting'&&state.passive_wait?'Начнём полный учёт с ближайших 03:00 МСК.':state.mode==='hold'?'Суточный порог достигнут. Дождитесь новых суток.':!policy.stop_on_limit?'Трафик учитывается. Остановка по порогу отключена.':snap.node_running?'Guard следит за расходом трафика.':'Можно запустить при достоверном остатке лимита.';
   $('.node-footnote').textContent=policy.stop_on_limit?'Запуск разрешён только при доступном остатке лимита.':'Порог не ограничивает запуск. Ручная пауза и аварийная защита действуют.';
   $('#interface').textContent=cfg.interface;$('#coverage').textContent=trusted&&state.accounting_complete!==false?'Полный':'Неполный';$('#controller-state').textContent=fault?'Блокировка':fresh&&health.ok?'Работает':'Требует проверки';
   $('#pause').disabled=busy||!fresh||!snap.node_running;$('#resume').disabled=busy||!fresh||!!fault||state.mode!=='active'||(policy.stop_on_limit&&state.used>=cfg.limit)||snap.node_missing||(snap.node_running&&!state.manual_paused);$('#rearm').disabled=busy||!fresh;
-  $('#setting-target').textContent=cfg.target;$('#setting-interface').textContent=cfg.interface;$('#setting-limit').textContent=gb(cfg.limit);
+  $('#setting-target').textContent=target.name;$('#setting-interface').textContent=cfg.interface;$('#setting-limit').textContent=gb(cfg.limit);
 }
 function rows(target, days) { const body=$(target);body.replaceChildren();if(!days.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.textContent='История появится после первых измерений. Расход до установки неизвестен.';tr.append(td);body.append(tr);return;}for(const day of days){const tr=document.createElement('tr');for(const text of [day.day,gb(day.used),gb(day.rx),gb(day.tx)]){const td=document.createElement('td');td.textContent=text;tr.append(td);}const td=document.createElement('td'),tag=document.createElement('span');tag.className='coverage-tag'+(day.complete?' full':'');tag.textContent=day.complete?'Полный':'Неполный';td.append(tag);tr.append(td);body.append(tr);} }
 function drawChart(samples) {
@@ -182,11 +192,14 @@ async function action(name, extra={}) {
     if(!result||result.pending)throw new Error('Ответ задерживается. Проверьте состояние перед повторным действием.');
     if(!result.ok)throw new Error(result.error || 'Действие не выполнено');
     if(name==='settings'){settingsDirty=false;$('#settings-feedback').textContent='Сохранено. Настройки уже действуют.';$('#settings-error').textContent='';}
-    toast({pause:'Нода остановлена',resume:'Нода запущена',rearm:'Учёт восстановлен. Нода ждёт 03:00 МСК.',settings:'Настройки сохранены и применены'}[name]);
+    if(name==='target'){targetDirty=false;$('#target-feedback').textContent='Выбор сохранён и уже действует.';$('#target-error').textContent='';}
+    toast({pause:'Сервис остановлен',resume:'Сервис запущен',rearm:'Учёт восстановлен. Сервис ждёт 03:00 МСК.',settings:'Настройки сохранены и применены',target:'Цель управления изменена'}[name]);
     await refreshStatus();await refreshHistory();return true;
-  } catch(e){toast(e.message);if(name==='settings')$('#settings-error').textContent=e.message;return false;}
+  } catch(e){toast(e.message);if(name==='settings')$('#settings-error').textContent=e.message;if(name==='target')$('#target-error').textContent=e.message;return false;}
   finally{busy=false;if(statusData)renderStatus(statusData);}
 }
+$('#target-select').addEventListener('change',()=>{targetDirty=true;$('#target-error').textContent='';$('#target-feedback').textContent='Выбор ещё не применён.';if(statusData)renderStatus(statusData);});
+$('#target-settings').addEventListener('submit',event=>{event.preventDefault();const kind=$('#target-select').value;action('target',{target:{kind,name:kind==='systemd'?'haproxy.service':statusData.snapshot.state.config.target}});});
 $('#quota-settings').addEventListener('input',()=>{settingsDirty=true;$('#settings-error').textContent='';$('#limit-gb').removeAttribute('aria-invalid');$('#settings-feedback').textContent='Изменения ещё не применены.';if(statusData)renderStatus(statusData);});
 $('#limit-gb').addEventListener('blur',()=>{if(settingsLoaded)try{readSettings();}catch(e){$('#settings-error').textContent=e.message;$('#limit-gb').setAttribute('aria-invalid','true');}});
 $('#quota-settings').addEventListener('submit',event=>{event.preventDefault();try{const settings=readSettings();$('#settings-error').textContent='';$('#limit-gb').removeAttribute('aria-invalid');action('settings',{settings});}catch(e){$('#settings-error').textContent=e.message;$('#limit-gb').setAttribute('aria-invalid','true');$('#limit-gb').focus();}});

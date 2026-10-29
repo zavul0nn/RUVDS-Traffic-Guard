@@ -44,7 +44,10 @@ def main():
     history.db.close()
     stopped=threading.Event()
     def controller_loop():
-        controller=guard.Controller(cfg,directory,FakeDocker(),reader)
+        docker = FakeDocker()
+        haproxy = FakeDocker(policy='always')
+        controller=guard.Controller(cfg,directory,docker,reader,
+                                    target_factory=lambda target:haproxy if target['kind']=='systemd' else docker)
         try:
             while not stopped.is_set():
                 try:

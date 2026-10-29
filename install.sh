@@ -84,6 +84,7 @@ if [[ -f $DEST/.env ]]; then
     while IFS='=' read -r key value; do
         case "$key" in
             TARGET_CONTAINER) TARGET_CONTAINER=${TARGET_CONTAINER:-$value} ;;
+            TARGET_MODE) TARGET_MODE=${TARGET_MODE:-$value} ;;
             INTERFACE) INTERFACE=${INTERFACE:-$value} ;;
             LIMIT_BYTES) LIMIT_BYTES=${LIMIT_BYTES:-$value} ;;
             WEB_PORT) WEB_PORT=${WEB_PORT:-$value} ;;
@@ -95,6 +96,7 @@ if [[ -f $DEST/.env ]]; then
     done < "$DEST/.env"
 fi
 TARGET_CONTAINER=${TARGET_CONTAINER:-remnanode}
+TARGET_MODE=${TARGET_MODE:-remnanode}
 INTERFACE=${INTERFACE:-eth0}
 LIMIT_BYTES=${LIMIT_BYTES:-145000000000}
 WEB_PORT=${WEB_PORT:-47479}
@@ -107,6 +109,10 @@ WEB_PATH=${WEB_PATH:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(2
 [[ $OLD_SERVICE =~ ^[a-zA-Z0-9_.@-]+$ ]] || fail 'Invalid old service name.'
 [[ -r /sys/class/net/$INTERFACE/statistics/rx_bytes ]] || fail 'Interface not found. Set INTERFACE=ens3 if needed.'
 if [[ -t 0 ]]; then
+    if [[ ! -f $DATA/state.json ]]; then
+        read -r -p "Managed target: remnanode (Docker) or haproxy (systemd) [$TARGET_MODE]: " answer
+        TARGET_MODE=${answer:-$TARGET_MODE}
+    fi
     printf '\nWeb panel settings. HTTP does not encrypt passwords or sessions.\n'
     read -r -p "Web port [$WEB_PORT]: " answer
     WEB_PORT=${answer:-$WEB_PORT}
@@ -123,6 +129,7 @@ if [[ -t 0 ]]; then
         unset answer repeated
     fi
 fi
+[[ $TARGET_MODE == remnanode || $TARGET_MODE == haproxy ]] || fail 'TARGET_MODE must be remnanode or haproxy.'
 if [[ -n ${WEB_PASSWORD_FILE:-} ]]; then
     [[ -f $WEB_PASSWORD_FILE ]] || fail 'WEB_PASSWORD_FILE not found.'
     IFS= read -r WEB_PASSWORD < "$WEB_PASSWORD_FILE" || [[ -n ${WEB_PASSWORD:-} ]]
@@ -147,7 +154,7 @@ if ! id "$WEB_USER" >/dev/null 2>&1; then useradd --system --user-group --no-cre
 WEB_UID=$(id -u "$WEB_USER")
 WEB_GID=$(id -g "$WEB_USER")
 [[ $WEB_UID != 0 ]] || fail 'Web user must not be root.'
-for file in guard.py history.py web.py test_guard.py test_web.py Dockerfile compose.yaml .dockerignore; do [[ -f $SOURCE/$file ]] || fail "Missing source: $file"; done
+for file in guard.py history.py web.py host_target.py traffic-guard-target.service test_guard.py test_web.py test_host_target.py Dockerfile compose.yaml .dockerignore; do [[ -f $SOURCE/$file ]] || fail "Missing source: $file"; done
 [[ -d $SOURCE/static ]] || fail 'Missing panel assets.'
 mkdir -p -m 700 "$BACKUP" "$DEST"
 mkdir -p "$DATA" "$DATA/commands" "$DEST/secrets"
@@ -162,7 +169,7 @@ if [[ -f $DEST/compose.yaml ]]; then cp -a "$DEST/." "$BACKUP/installation"; fi
 if docker_local inspect "$TARGET_CONTAINER" >/dev/null 2>&1; then docker_local inspect --format 'Restart={{.HostConfig.RestartPolicy.Name}} Running={{.State.Running}}' "$TARGET_CONTAINER" > "$BACKUP/target-before.txt"
 else printf 'Target container is not created yet; guard will wait for it.\n'; fi
 if [[ $SOURCE != "$DEST" ]]; then
-    for file in guard.py history.py web.py test_guard.py test_web.py Dockerfile compose.yaml .dockerignore README.md VALIDATION.md DESIGN.md install.sh; do
+    for file in guard.py history.py web.py host_target.py traffic-guard-target.service test_guard.py test_web.py test_host_target.py Dockerfile compose.yaml .dockerignore README.md VALIDATION.md DESIGN.md install.sh; do
         [[ ! -f $SOURCE/$file ]] || install -m 600 "$SOURCE/$file" "$DEST/$file"
     done
     cp -a "$SOURCE/static" "$DEST/"
@@ -176,11 +183,17 @@ if [[ -n ${WEB_PASSWORD:-} ]]; then
 fi
 chmod 0440 "$DEST/secrets/web-auth.json"
 chown root:"$WEB_GID" "$DEST/secrets/web-auth.json"
-printf 'TARGET_CONTAINER=%s\nINTERFACE=%s\nLIMIT_BYTES=%s\nWEB_PORT=%s\nWEB_PATH=%s\nWEB_BIND=%s\nWEB_UID=%s\nWEB_GID=%s\n' "$TARGET_CONTAINER" "$INTERFACE" "$LIMIT_BYTES" "$WEB_PORT" "$WEB_PATH" "$WEB_BIND" "$WEB_UID" "$WEB_GID" > "$DEST/.env"
-export TARGET_CONTAINER INTERFACE LIMIT_BYTES WEB_PORT WEB_PATH WEB_BIND WEB_UID WEB_GID
+printf 'TARGET_CONTAINER=%s\nTARGET_MODE=%s\nINTERFACE=%s\nLIMIT_BYTES=%s\nWEB_PORT=%s\nWEB_PATH=%s\nWEB_BIND=%s\nWEB_UID=%s\nWEB_GID=%s\n' "$TARGET_CONTAINER" "$TARGET_MODE" "$INTERFACE" "$LIMIT_BYTES" "$WEB_PORT" "$WEB_PATH" "$WEB_BIND" "$WEB_UID" "$WEB_GID" > "$DEST/.env"
+export TARGET_CONTAINER TARGET_MODE INTERFACE LIMIT_BYTES WEB_PORT WEB_PATH WEB_BIND WEB_UID WEB_GID
 compose config --quiet
 printf 'Building images and testing before switching services...\n'
 compose build --pull
+install -m 0644 "$DEST/traffic-guard-target.service" /etc/systemd/system/traffic-guard-target.service
+systemctl daemon-reload
+systemctl enable traffic-guard-target.service >/dev/null
+systemctl restart traffic-guard-target.service
+[[ -S /run/traffic-guard-target/control.sock ]] || sleep 1
+[[ -S /run/traffic-guard-target/control.sock ]] || fail 'Host target bridge did not start.'
 compose run --rm --no-deps --entrypoint python guard -c 'import guard; print(guard.sample(guard.config()))'
 changed=1
 if [[ $OLD_SERVICE != none ]]; then
@@ -209,7 +222,7 @@ for ((attempt=0; attempt<45; attempt++)); do
         [[ $http_code == 200 ]] || fail 'Panel login check failed.'
         server_ip=$(hostname -I | awk '{print $1}')
         printf '\nInstalled. Panel: http://%s:%s/%s\n' "${server_ip:-SERVER_IP}" "$WEB_PORT" "$WEB_PATH"
-        printf 'Traffic before installation is unknown. Guard observes until 03:00 Moscow; node keeps its current state.\n'
+        printf 'Existing accounting and target selection are preserved. New installations observe until 03:00 Moscow.\n'
         printf 'Directory: %s\nBackup: %s\nLogs: docker logs --tail 100 %s\n' "$DEST" "$BACKUP" "$GUARD"
         printf 'HTTP is unencrypted. The port can be scanned; the secret path does not replace the password.\n'
         exit 0

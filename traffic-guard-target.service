@@ -1,0 +1,19 @@
+[Unit]
+Description=Traffic Guard restricted HAProxy control bridge
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/remnanode-traffic-guard/host_target.py
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=traffic-guard-target
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

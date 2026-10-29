@@ -17,7 +17,13 @@ services:
       TARGET_CONTAINER: ${TARGET_CONTAINER:-remnanode}
       INTERFACE: ${INTERFACE:-eth0}
       LIMIT_BYTES: ${LIMIT_BYTES:-145000000000}
+      TARGET_MODE: ${TARGET_MODE:-remnanode}
     volumes:
+      - type: bind
+        source: /run/traffic-guard-target
+        target: /host/target
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: /var/run/docker.sock
         target: /var/run/docker.sock

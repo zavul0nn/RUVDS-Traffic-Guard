@@ -18,7 +18,7 @@ import time
 from urllib.parse import urlsplit
 
 from history import read_history
-from guard import validate_settings
+from guard import validate_settings, validate_target
 
 
 def controller_fresh(health, now):
@@ -46,7 +46,7 @@ def password_matches(password, record):
     return hmac.compare_digest(digest, base64.b64decode(record['digest']))
 
 
-def write_request(directory, action, settings=None):
+def write_request(directory, action, settings=None, target=None):
     request_id = secrets.token_hex(16)
     path = directory / (request_id + '.request.json')
     temp = directory / (request_id + '.tmp')
@@ -55,6 +55,8 @@ def write_request(directory, action, settings=None):
         request = dict(action=action, at=time.time())
         if settings is not None:
             request['settings'] = settings
+        if target is not None:
+            request['target'] = target
         json.dump(request, file)
         file.flush()
         os.fsync(file.fileno())
@@ -288,7 +290,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.sessions.pop(token, None)
             self.respond(200, {'ok': True}, headers={'Set-Cookie': f'guard_session=; Path={self.server.prefix}; HttpOnly; SameSite=Strict; Max-Age=0'})
             return
-        if route != '/api/action' or request.get('action') not in ('pause', 'resume', 'rearm', 'settings'):
+        if route != '/api/action' or request.get('action') not in ('pause', 'resume', 'rearm', 'settings', 'target'):
             self.not_found()
             return
         if request['action'] == 'rearm' and request.get('confirm') != 'rearm':
@@ -299,6 +301,13 @@ class Handler(BaseHTTPRequestHandler):
                 validate_settings(request.get('settings'))
             except ValueError:
                 self.respond(400, {'error': 'Укажите положительный порог до 9 000 000 GB и действие при его достижении.'})
+                return
+        if request['action'] == 'target':
+            try:
+                saved = json.loads((self.server.data / 'state.json').read_text())
+                validate_target(request.get('target'), saved['config'])
+            except (ValueError, KeyError, OSError):
+                self.respond(400, {'error': 'Выберите remnanode или HAProxy из списка.'})
                 return
         try:
             with self.server.lock:
@@ -313,7 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(list(self.server.commands.glob('*.request.json'))) >= 20:
                 raise RuntimeError('Command queue is full')
             request_id = write_request(self.server.commands, request['action'],
-                                       request.get('settings') if request['action'] == 'settings' else None)
+                                       request.get('settings') if request['action'] == 'settings' else None,
+                                       request.get('target') if request['action'] == 'target' else None)
             self.respond(202, {'id': request_id})
         except Exception:
             self.respond(503, {'error': 'Контроллер недоступен. Проверьте Docker и журнал guard.'})

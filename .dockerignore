@@ -2,6 +2,8 @@
 !guard.py
 !test_guard.py
 !test_web.py
+!test_host_target.py
+!host_target.py
 !history.py
 !web.py
 !static/

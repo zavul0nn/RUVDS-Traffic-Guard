@@ -1,0 +1,41 @@
+"""Target selector regression check against local preview.py (fake services only)."""
+from pathlib import Path
+from playwright.sync_api import sync_playwright, expect
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch()
+    page = browser.new_page(viewport={'width':1440,'height':1060})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto('http://127.0.0.1:8789/preview-hidden-path-0123456789')
+    page.locator('#password').fill('preview-password-123')
+    page.locator('#login-form button').click()
+    expect(page.locator('#state-badge')).to_have_text('Учёт активен')
+    page.locator('[data-tab="settings"]').click()
+    expect(page.locator('#save-target')).to_be_disabled()
+    page.locator('#target-select').select_option('systemd')
+    page.locator('#save-target').click()
+    expect(page.locator('#node-name')).to_have_text('HAProxy', timeout=10000)
+    expect(page.locator('#setting-target')).to_have_text('haproxy.service')
+    expect(page.locator('#pause')).to_have_text('Остановить HAProxy')
+    page.reload()
+    page.locator('[data-tab="settings"]').click()
+    expect(page.locator('#target-select')).to_have_value('systemd')
+    page.screenshot(path=str(Path('artifacts/settings-target-desktop.png')), full_page=True)
+    page.set_viewport_size({'width':390,'height':844})
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+    page.screenshot(path=str(Path('artifacts/settings-target-mobile.png')), full_page=True)
+    page.set_viewport_size({'width':1440,'height':1060})
+    page.locator('#limit-gb').fill('1')
+    page.locator('#save-settings').click()
+    expect(page.locator('#state-badge')).to_have_text('Лимит достигнут', timeout=10000)
+    expect(page.locator('#node-state')).to_have_text('Остановлена')
+    page.locator('#limit-gb').fill('145')
+    page.locator('#save-settings').click()
+    expect(page.locator('#node-state')).to_have_text('Работает', timeout=10000)
+    page.locator('#target-select').select_option('docker')
+    page.locator('#save-target').click()
+    expect(page.locator('#node-name')).to_have_text('remnanode', timeout=10000)
+    assert not errors, errors
+    browser.close()
+print('Target UI QA passed: select HAProxy/remnanode, persistence, threshold stop/resume, mobile; no JS errors.')
