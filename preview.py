@@ -11,6 +11,7 @@ import guard
 from history import History
 from test_guard import FakeDocker
 import web
+from resources import Store
 
 
 def main():
@@ -42,7 +43,22 @@ def main():
         history.db.execute('INSERT INTO samples VALUES (?,?,?)',(int(stamp),wave*6e6+5e5,wave*3e6+3e5))
     history.db.commit()
     history.db.close()
+    resource_store=Store(directory/'resources.sqlite3')
+    for step in range(2880):
+        stamp=began-86400+step*30
+        cpu=8+abs(math.sin(step*.014))**10*64+abs(math.sin(step*.19))*6
+        total=2*1073741824
+        used=int(total*(.37+.1*math.sin(step*.004)+.04*math.sin(step*.03)))
+        resource_store.db.execute('INSERT INTO resources VALUES (?,?,?,?)',[stamp,round(cpu,2),used,total])
+    resource_store.db.commit()
+    resource_store.db.close()
     stopped=threading.Event()
+    class PreviewSampler:
+        def read(self):
+            now=time.time();total=2*1073741824
+            return [now,round(12+abs(math.sin(now*.01))*18,2),int(total*.43),total]
+    from resources import start_collector
+    metric_thread=start_collector(directory,stopped,PreviewSampler())
     def controller_loop():
         docker = FakeDocker()
         haproxy = FakeDocker(policy='always')
@@ -74,6 +90,7 @@ def main():
         panel.server_close()
         stopped.set()
         thread.join(timeout=3)
+        metric_thread.join(timeout=1)
         temporary.cleanup()
 
 

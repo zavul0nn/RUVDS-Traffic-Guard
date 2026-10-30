@@ -391,6 +391,33 @@ class HTTPTests(unittest.TestCase):
         status, _, _ = self.request('POST', '/' + self.prefix + '/api/action', {'action': 'pause'})
         self.assertEqual(status, 503)
 
+    def test_resource_history_is_authenticated_and_incremental(self):
+        route='/' + self.prefix + '/api/resources'
+        status,_,_=self.request('GET',route)
+        self.assertEqual(status,401)
+        self.login()
+        from resources import Store
+        store=Store(self.data/'resources.sqlite3')
+        now=time.time()
+        rows=[[now-60,None,100,200],[now-30,25,120,200]]
+        for row in rows:store.record(row)
+        store.db.close()
+        status,_,body=self.request('GET',route)
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(body)['samples'],rows)
+        status,_,body=self.request('GET',route+'?since='+str(now-60))
+        self.assertEqual(json.loads(body)['samples'],rows[1:])
+
+    def test_resource_history_rejects_invalid_cursor_and_handles_no_database(self):
+        self.login()
+        route='/' + self.prefix + '/api/resources'
+        status,_,body=self.request('GET',route)
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(body)['samples'],[])
+        for value in ('nan','inf','-1','invalid'):
+            status,_,_=self.request('GET',route+'?since='+value)
+            self.assertEqual(status,400)
+
     def test_target_change_is_authenticated_and_bounded(self):
         self.login()
         guard.atomic_json(self.data / 'state.json', state())

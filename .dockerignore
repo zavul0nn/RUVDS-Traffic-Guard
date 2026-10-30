@@ -4,6 +4,8 @@
 !test_web.py
 !test_host_target.py
 !host_target.py
+!resources.py
+!test_resources.py
 !history.py
 !web.py
 !static/

@@ -8,6 +8,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -15,7 +16,7 @@ import secrets
 import sys
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 from history import read_history
 from guard import validate_settings, validate_target
@@ -192,6 +193,7 @@ class Handler(BaseHTTPRequestHandler):
                   '/login.js': ('login.js', 'text/javascript; charset=utf-8')}
         if session:
             assets['/app.js'] = ('app.js', 'text/javascript; charset=utf-8')
+            assets['/resources.js'] = ('resources.js', 'text/javascript; charset=utf-8')
         if route in assets:
             name, mime = assets[route]
             # Rewrite relative asset URLs also for a URL without trailing slash.
@@ -222,6 +224,18 @@ class Handler(BaseHTTPRequestHandler):
                 result['server_time'] = time.time()
                 result['controller_fresh'] = controller_fresh(result['health'], result['server_time'])
                 self.respond(200, result)
+            elif route == '/api/resources':
+                from resources import read_samples
+                try:
+                    since = float(parse_qs(urlsplit(self.path).query).get('since', ['0'])[0])
+                    if not math.isfinite(since) or since < 0:
+                        raise ValueError()
+                except (ValueError, IndexError):
+                    self.respond(400, {'error': 'Invalid resource history cursor'})
+                    return
+                now = time.time()
+                self.respond(200, dict(server_time=now, interval=30,
+                                      samples=read_samples(self.server.data / 'resources.sqlite3', now, since)))
             elif route in ('/api/history', '/api/export'):
                 result = read_history(self.server.data / 'history.sqlite3', time.time())
                 if route == '/api/export':

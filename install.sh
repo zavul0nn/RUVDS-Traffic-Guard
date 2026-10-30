@@ -154,7 +154,7 @@ if ! id "$WEB_USER" >/dev/null 2>&1; then useradd --system --user-group --no-cre
 WEB_UID=$(id -u "$WEB_USER")
 WEB_GID=$(id -g "$WEB_USER")
 [[ $WEB_UID != 0 ]] || fail 'Web user must not be root.'
-for file in guard.py history.py web.py host_target.py traffic-guard-target.service test_guard.py test_web.py test_host_target.py Dockerfile compose.yaml .dockerignore; do [[ -f $SOURCE/$file ]] || fail "Missing source: $file"; done
+for file in guard.py history.py web.py host_target.py resources.py traffic-guard-target.service test_guard.py test_web.py test_host_target.py test_resources.py Dockerfile compose.yaml .dockerignore; do [[ -f $SOURCE/$file ]] || fail "Missing source: $file"; done
 [[ -d $SOURCE/static ]] || fail 'Missing panel assets.'
 mkdir -p -m 700 "$BACKUP" "$DEST"
 mkdir -p "$DATA" "$DATA/commands" "$DEST/secrets"
@@ -169,7 +169,7 @@ if [[ -f $DEST/compose.yaml ]]; then cp -a "$DEST/." "$BACKUP/installation"; fi
 if docker_local inspect "$TARGET_CONTAINER" >/dev/null 2>&1; then docker_local inspect --format 'Restart={{.HostConfig.RestartPolicy.Name}} Running={{.State.Running}}' "$TARGET_CONTAINER" > "$BACKUP/target-before.txt"
 else printf 'Target container is not created yet; guard will wait for it.\n'; fi
 if [[ $SOURCE != "$DEST" ]]; then
-    for file in guard.py history.py web.py host_target.py traffic-guard-target.service test_guard.py test_web.py test_host_target.py Dockerfile compose.yaml .dockerignore README.md VALIDATION.md DESIGN.md install.sh; do
+    for file in guard.py history.py web.py host_target.py resources.py traffic-guard-target.service test_guard.py test_web.py test_host_target.py test_resources.py Dockerfile compose.yaml .dockerignore README.md VALIDATION.md DESIGN.md install.sh; do
         [[ ! -f $SOURCE/$file ]] || install -m 600 "$SOURCE/$file" "$DEST/$file"
     done
     cp -a "$SOURCE/static" "$DEST/"
@@ -191,9 +191,7 @@ compose build --pull
 install -m 0644 "$DEST/traffic-guard-target.service" /etc/systemd/system/traffic-guard-target.service
 systemctl daemon-reload
 systemctl enable traffic-guard-target.service >/dev/null
-systemctl restart traffic-guard-target.service
-[[ -S /run/traffic-guard-target/control.sock ]] || sleep 1
-[[ -S /run/traffic-guard-target/control.sock ]] || fail 'Host target bridge did not start.'
+install -d -m 0700 /run/traffic-guard-target
 compose run --rm --no-deps --entrypoint python guard -c 'import guard; print(guard.sample(guard.config()))'
 changed=1
 if [[ $OLD_SERVICE != none ]]; then
@@ -206,6 +204,9 @@ if [[ $OLD_SERVICE != none ]]; then
     fi
 fi
 compose stop guard web
+systemctl restart traffic-guard-target.service
+[[ -S /run/traffic-guard-target/control.sock ]] || sleep 1
+[[ -S /run/traffic-guard-target/control.sock ]] || fail 'Host target bridge did not start.'
 cp -a "$DATA" "$BACKUP/data"
 find "$DATA" -maxdepth 1 -type f -exec chown root:"$WEB_GID" {} + -exec chmod 0640 {} +
 if [[ ! -f $DATA/state.json && ! -f $DATA/fault.json ]]; then compose run --rm --no-deps guard init; fi

@@ -673,6 +673,12 @@ def main():
         stopping = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stopping.set())
+        metrics = None
+        try:
+            from resources import start_collector
+            metrics = start_collector(directory, stopping)
+        except Exception as error:
+            log('resource_metrics_error', error=str(error))
         log('started', **cfg)
         try:
             while not stopping.is_set():
@@ -686,6 +692,9 @@ def main():
                     log('command_queue_error', error=str(error))
                 stopping.wait(3)
         finally:
+            stopping.set()
+            if metrics is not None:
+                metrics.join(timeout=1)
             # Intentional shutdown removes protection, so stop the target too.
             controller.shutdown()
     return 0
