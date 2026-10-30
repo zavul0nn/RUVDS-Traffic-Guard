@@ -5,11 +5,36 @@ import os
 from pathlib import Path
 import socketserver
 import subprocess
+import tempfile
 
 UNIT = 'haproxy.service'
 SOCKET = Path('/run/traffic-guard-target/control.sock')
-DROPIN = Path('/etc/systemd/system/haproxy.service.d/90-traffic-guard.conf')
+DROPIN = Path('/etc/systemd/system/haproxy.service.d/zzzz-traffic-guard.conf')
 BACKUP = Path('/var/lib/remnanode-traffic-guard/haproxy-policy-before.json')
+POLICY = '[Service]\nRestart=no\n'
+
+
+def install_policy():
+    DROPIN.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.traffic-guard-', dir=DROPIN.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, 'w') as file:
+            file.write(POLICY)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp, DROPIN)
+        legacy = DROPIN.with_name('90-traffic-guard.conf')
+        if legacy.exists() and legacy != DROPIN and legacy.read_text() == POLICY:
+            legacy.unlink()  # Only remove the exact file owned by the old guard.
+        fd = os.open(DROPIN.parent, os.O_RDONLY | os.O_DIRECTORY) if os.name == 'posix' else None
+        if fd is not None:
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def systemctl(*args):
@@ -46,8 +71,7 @@ def execute(action):
                 json.dump(before['systemd'], file, indent=2)
                 file.flush()
                 os.fsync(file.fileno())
-        DROPIN.parent.mkdir(parents=True, exist_ok=True)
-        DROPIN.write_text('[Service]\nRestart=no\n')
+        install_policy()
         systemctl('disable', UNIT)
         systemctl('daemon-reload')
     elif action in ('stop', 'start'):

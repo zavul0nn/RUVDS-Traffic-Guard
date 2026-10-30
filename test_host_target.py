@@ -12,6 +12,7 @@ import web
 
 HAPROXY = {'kind': 'systemd', 'name': 'haproxy.service'}
 DOCKER = {'kind': 'docker', 'name': 'remnanode'}
+REAL_DROPIN = host_target.DROPIN
 
 
 class BridgeTests(unittest.TestCase):
@@ -72,6 +73,25 @@ class BridgeTests(unittest.TestCase):
         self.props['LoadState'] = 'not-found'
         self.assertTrue(host_target.execute('stop')['missing'])
         self.assertFalse(host_target.DROPIN.exists())
+
+    def test_policy_is_applied_after_standard_override(self):
+        self.assertGreater(REAL_DROPIN.name, 'override.conf')
+        host_target.DROPIN.parent.mkdir()
+        override = host_target.DROPIN.with_name('override.conf')
+        legacy = host_target.DROPIN.with_name('90-traffic-guard.conf')
+        original = '[Service]\nRestart=always\nLimitNOFILE=65536\n'
+        override.write_text(original)
+        legacy.write_text(host_target.POLICY)
+        host_target.execute('set_restart_no')
+        self.assertEqual(override.read_text(), original)
+        self.assertFalse(legacy.exists())
+
+    def test_customized_legacy_file_is_not_removed(self):
+        host_target.DROPIN.parent.mkdir()
+        legacy = host_target.DROPIN.with_name('90-traffic-guard.conf')
+        legacy.write_text('[Service]\nRestart=on-failure\n')
+        host_target.execute('set_restart_no')
+        self.assertTrue(legacy.exists())
 
 
 class TargetControllerTests(unittest.TestCase):
